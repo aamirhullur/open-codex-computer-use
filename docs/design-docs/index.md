@@ -11,3 +11,7 @@
 ## 初始文档
 
 - `core-beliefs.md`
+
+## Proposed designs
+
+- `stateless-mcp-2026-07-28.md` — proposed dual-era MCP `2026-07-28` migration, explicit snapshot handles, compatibility rollout, and verification criteria. The active implementation plan is `docs/exec-plans/active/20260813-stateless-mcp-2026-07-28.md`.
