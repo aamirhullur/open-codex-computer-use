@@ -26,10 +26,19 @@ public struct ToolResultContentItem: @unchecked Sendable {
 public struct ToolCallResult: @unchecked Sendable {
     public let content: [ToolResultContentItem]
     public let isError: Bool
+    // Optional structured payload (get_app_state metadata, snapshot-ref error
+    // envelopes). Serialized only when non-nil; wire-only decoration such as
+    // resultType/_meta is added by the modern adapter, never here.
+    public let structuredContent: [String: Any]?
 
-    public init(content: [ToolResultContentItem], isError: Bool = false) {
+    public init(
+        content: [ToolResultContentItem],
+        isError: Bool = false,
+        structuredContent: [String: Any]? = nil
+    ) {
         self.content = content
         self.isError = isError
+        self.structuredContent = structuredContent
     }
 
     public var primaryText: String? {
@@ -37,10 +46,14 @@ public struct ToolCallResult: @unchecked Sendable {
     }
 
     public var asDictionary: [String: Any] {
-        [
+        var dictionary: [String: Any] = [
             "content": content.map(\.dictionary),
             "isError": isError,
         ]
+        if let structuredContent {
+            dictionary["structuredContent"] = structuredContent
+        }
+        return dictionary
     }
 
     public static func text(_ text: String, isError: Bool = false) -> ToolCallResult {

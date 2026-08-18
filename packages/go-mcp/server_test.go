@@ -11,9 +11,10 @@ import (
 // dispatcher used across the unit tests.
 func testHooks() Hooks {
 	return Hooks{
-		Instructions: "test-instructions",
-		Version:      "9.9.9",
-		ToolDefinitions: func() any {
+		Instructions:       "test-instructions",
+		ModernInstructions: "test-instructions",
+		Version:            "9.9.9",
+		ToolCatalog: func(modern bool) any {
 			return []map[string]any{{"name": "list_apps"}, {"name": "get_app_state"}}
 		},
 		CallTool: func(name string, args map[string]any) any {

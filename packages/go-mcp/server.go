@@ -10,13 +10,18 @@ import (
 // provide their instructions/version strings and the tool dispatch callbacks;
 // the protocol layer owns everything else.
 type Hooks struct {
-	// Instructions is the server instructions string surfaced by legacy
-	// initialize and modern server/discover.
+	// Instructions is the legacy server instructions string surfaced by
+	// legacy initialize.
 	Instructions string
+	// ModernInstructions is the modern server instructions string surfaced by
+	// server/discover. It describes the explicit snapshot state chain.
+	ModernInstructions string
 	// Version is the build version reported in serverInfo.
 	Version string
-	// ToolDefinitions returns the tool catalog value (a marshalable list).
-	ToolDefinitions func() any
+	// ToolCatalog returns the tool catalog value (a marshalable list) for the
+	// requested era: modern=false yields the legacy catalog, modern=true yields
+	// the modern catalog whose action tools require snapshot_ref.
+	ToolCatalog func(modern bool) any
 	// CallTool dispatches a tool call and returns its result value (a
 	// marshalable tool result).
 	CallTool func(name string, args map[string]any) any
@@ -119,7 +124,7 @@ func (s *Server) handleLegacy(id any, method string, params map[string]any) map[
 	case "ping":
 		return result(id, map[string]any{})
 	case "tools/list":
-		return result(id, map[string]any{"tools": s.hooks.ToolDefinitions()})
+		return result(id, map[string]any{"tools": s.hooks.ToolCatalog(false)})
 	case "tools/call":
 		return result(id, s.callTool(params))
 	default:
@@ -144,7 +149,7 @@ func (s *Server) handleModern(id any, method string, params map[string]any) map[
 		return s.decorate(id, s.discoverResult())
 	case "tools/list":
 		return s.decorate(id, map[string]any{
-			"tools":      s.hooks.ToolDefinitions(),
+			"tools":      s.hooks.ToolCatalog(true),
 			"ttlMs":      cacheTTLMs,
 			"cacheScope": cacheScope,
 		})

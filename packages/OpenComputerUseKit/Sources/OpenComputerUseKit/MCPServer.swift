@@ -17,6 +17,29 @@ Avoid falling back to AppleScript during a computer use session. Prefer Computer
 Ask the user before taking destructive or externally visible actions such as sending, deleting, or purchasing. If helpful, you can ask follow-up questions before taking action to make sure you’re understanding the user’s request correctly.
 """
 
+// Modern-era (2026-07-28) instructions. Describes the explicit state chain:
+// get_app_state returns a snapshot_ref, every action requires it, and every
+// action result returns a successor to thread forward. The legacy string above
+// is unchanged and byte-identical.
+let modernComputerUseServerInstructions = """
+Computer Use tools let you interact with macOS apps by performing UI actions.
+
+Some apps might have a separate dedicated plugin or skill. You may want to use that plugin or skill instead of Computer Use when it seems like a good fit for the task. While the separate plugin or skill may not expose every feature in the app, if the plugin can perform the task with its available features, prefer it. If the needed capability is not exposed there, use Computer Use may be appropriate for the missing interaction.
+
+Begin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. It returns a snapshot_ref that identifies the captured window state. Codex will automatically stop the session after each assistant turn, so this step is required before interacting with apps in a new assistant turn.
+
+Every action tool (click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value) requires the snapshot_ref returned by the immediately preceding get_app_state or action result for that app. Each action result returns a successor snapshot_ref; pass that value into the next action so the chain stays current, and do not reuse an older snapshot_ref once a newer one is returned.
+
+The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value. If any of these are not available in your environment, use tool_search to surface one before calling any Computer Use action tools.
+
+Computer Use tools allow you to use the user's apps in the background, so while you're using an app, the user can continue to use other apps on their computer. Avoid doing anything that would disrupt the user's active session, such as overwriting the contents of their clipboard, unless they asked you to!
+
+After each action, use the successor snapshot_ref or fetch the latest state to verify the UI changed as expected.
+Prefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Note that element indices are the sequential integers from the app state's accessibility tree.
+Avoid falling back to AppleScript during a computer use session. Prefer Computer Use tools as much as possible to complete tasks.
+Ask the user before taking destructive or externally visible actions such as sending, deleting, or purchasing. If helpful, you can ask follow-up questions before taking action to make sure you're understanding the user's request correctly.
+"""
+
 public final class StdioMCPServer {
     private let dispatcher: ComputerUseToolDispatcher
     // Per-connection era, decided on the first classifiable request and sticky
@@ -233,7 +256,7 @@ public final class StdioMCPServer {
         [
             "supportedVersions": MCPProtocol.supportedVersions,
             "capabilities": ["tools": ["listChanged": false]],
-            "instructions": computerUseServerInstructions,
+            "instructions": modernComputerUseServerInstructions,
             "ttlMs": MCPProtocol.cacheTtlMs,
             "cacheScope": MCPProtocol.cacheScopePublic,
         ]
@@ -241,7 +264,7 @@ public final class StdioMCPServer {
 
     private func modernToolsListResult() -> [String: Any] {
         [
-            "tools": ToolDefinitions.all.map(\.asDictionary),
+            "tools": ToolCatalog.forEra(.modern20260728).map(\.asDictionary),
             "ttlMs": MCPProtocol.cacheTtlMs,
             "cacheScope": MCPProtocol.cacheScopePublic,
         ]

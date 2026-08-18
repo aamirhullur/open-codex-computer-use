@@ -28,6 +28,19 @@ var windowsRuntimeScript string
 
 const serverInstructions = "Computer Use tools let you interact with Windows apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Windows actions use UI Automation patterns first and fall back to window messages when an app does not expose the needed pattern. The Windows runtime does not auto-launch apps, perform SetFocus, or use UIA text fallback by default, so background-capable actions do not intentionally steal the user's foreground focus."
 
+// modernServerInstructions describes the explicit snapshot state chain used by
+// the modern 2026-07-28 era. Each get_app_state and each action result returns a
+// snapshot_ref that the next action must pass, so element and coordinate
+// targeting binds to the exact observed state instead of implicit process state.
+const modernServerInstructions = "Computer Use tools let you interact with Windows apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nEach `get_app_state` result returns a `snapshot_ref` that identifies the captured window state. Pass that `snapshot_ref` to every action call (click, perform_secondary_action, scroll, drag, type_text, press_key, set_value) so the action binds to the state you observed. Each successful action returns a fresh `snapshot_ref`; always pass the most recent one, and call `get_app_state` again to recapture whenever a `snapshot_ref` is reported missing, expired, unknown, or stale.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Windows actions use UI Automation patterns first and fall back to window messages when an app does not expose the needed pattern. The Windows runtime does not auto-launch apps, perform SetFocus, or use UIA text fallback by default, so background-capable actions do not intentionally steal the user's foreground focus."
+
+// Modern-era descriptions for the two capture tools. They mention the snapshot_ref
+// the action tools require; every other tool description is byte-identical to the
+// legacy catalog.
+const modernGetAppStateDescription = "Get the state of an already running app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. The result includes a `snapshot_ref` that identifies the captured window state; pass it to the action tools so they act on this exact state. This tool is part of plugin `Computer Use`."
+
+const modernListAppsDescription = "List the apps on this computer. Returns the set of apps that are currently running, as well as any that have been used in the last 14 days, including details on usage frequency. Call `get_app_state` next to capture a window and obtain the `snapshot_ref` the action tools require. This tool is part of plugin `Computer Use`."
+
 type toolDefinition struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
@@ -43,8 +56,9 @@ type contentItem struct {
 }
 
 type toolCallResult struct {
-	Content []contentItem `json:"content"`
-	IsError bool          `json:"isError"`
+	Content           []contentItem  `json:"content"`
+	IsError           bool           `json:"isError"`
+	StructuredContent map[string]any `json:"structuredContent,omitempty"`
 }
 
 func textResult(text string, isError bool) toolCallResult {
@@ -806,6 +820,47 @@ func toolDefinitions() []toolDefinition {
 	}
 }
 
+// toolDefinitionsForEra returns the catalog for the requested era. The legacy
+// catalog is the exact current toolDefinitions() output. The modern catalog is
+// the same nine tools in the same order, with the two capture tools carrying
+// snapshot_ref-aware descriptions and the seven action tools carrying a required
+// snapshot_ref argument; the era mechanic (which tools, and appending snapshot_ref
+// last to required) lives in the shared gomcp package. Each call rebuilds fresh
+// maps, so mutating the modern copy never affects the legacy catalog.
+func toolDefinitionsForEra(modern bool) []toolDefinition {
+	defs := toolDefinitions()
+	if !modern {
+		return defs
+	}
+	for i := range defs {
+		switch defs[i].Name {
+		case "get_app_state":
+			defs[i].Description = modernGetAppStateDescription
+		case "list_apps":
+			defs[i].Description = modernListAppsDescription
+		default:
+			if gomcp.IsModernActionTool(defs[i].Name) {
+				gomcp.AddSnapshotRefRequirement(defs[i].InputSchema)
+			}
+		}
+	}
+	return defs
+}
+
+// modernStateResult builds the modern get_app_state tool result: the existing
+// rendered text with a snapshot_ref line prepended, the screenshot, and the
+// pinned structuredContent block. The state values are injected here; real handle
+// minting and wire-level emission land with M3, so this is exercised only by unit
+// tests until then.
+func (s *appSnapshot) modernStateResult(state gomcp.StructuredState) toolCallResult {
+	result := s.result()
+	if len(result.Content) > 0 && result.Content[0].Type == "text" {
+		result.Content[0].Text = "snapshot_ref: " + state.SnapshotRef + "\n" + result.Content[0].Text
+	}
+	result.StructuredContent = state.StructuredContent()
+	return result
+}
+
 func objectSchema(properties map[string]any, required []string) map[string]any {
 	schema := map[string]any{
 		"type":                 "object",
@@ -1169,10 +1224,11 @@ func readJSONSource(inline, file string) (string, error) {
 func mcpServer() *gomcp.Server {
 	svc := newService()
 	return gomcp.NewServer(gomcp.Hooks{
-		Instructions:    serverInstructions,
-		Version:         version,
-		ToolDefinitions: func() any { return toolDefinitions() },
-		CallTool:        func(name string, args map[string]any) any { return svc.callTool(name, args) },
+		Instructions:       serverInstructions,
+		ModernInstructions: modernServerInstructions,
+		Version:            version,
+		ToolCatalog:        func(modern bool) any { return toolDefinitionsForEra(modern) },
+		CallTool:           func(name string, args map[string]any) any { return svc.callTool(name, args) },
 	})
 }
 

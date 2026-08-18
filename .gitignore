@@ -9,7 +9,10 @@ research/
 __pycache__/
 *.pyc
 
-# Go build artifacts (module has no cmd/ dir; `go build ./...` drops binaries in the app dirs)
-opencomputeruselinux
-opencomputerusewindows
-*.exe
+# Go build artifacts (module has no cmd/ dir; `go build ./...` drops binaries in the app dirs).
+# Anchored to the exact artifact paths so the unanchored, case-insensitive (macOS)
+# patterns do not also match the app source directories.
+/apps/OpenComputerUseLinux/opencomputeruselinux
+/apps/OpenComputerUseWindows/opencomputerusewindows
+/apps/OpenComputerUseWindows/*.exe
+/scripts/computer-use-cli/computer-use-cli

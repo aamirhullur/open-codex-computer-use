@@ -19,7 +19,7 @@
               "listChanged": false
             }
           },
-          "instructions": "Computer Use tools let you interact with Linux desktop apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Linux actions use AT-SPI2 semantic actions and editable text APIs first. Coordinate mouse and key synthesis are best-effort fallbacks and are not a universal Wayland background input model.",
+          "instructions": "Computer Use tools let you interact with Linux desktop apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nEach `get_app_state` result returns a `snapshot_ref` that identifies the captured window state. Pass that `snapshot_ref` to every action call (click, perform_secondary_action, scroll, drag, type_text, press_key, set_value) so the action binds to the state you observed. Each successful action returns a fresh `snapshot_ref`; always pass the most recent one, and call `get_app_state` again to recapture whenever a `snapshot_ref` is reported missing, expired, unknown, or stale.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Linux actions use AT-SPI2 semantic actions and editable text APIs first. Coordinate mouse and key synthesis are best-effort fallbacks and are not a universal Wayland background input model.",
           "resultType": "complete",
           "supportedVersions": [
             "2026-07-28",
@@ -99,6 +99,10 @@
                     ],
                     "type": "string"
                   },
+                  "snapshot_ref": {
+                    "description": "Snapshot reference returned by the immediately preceding get_app_state or action result for this app.",
+                    "type": "string"
+                  },
                   "x": {
                     "description": "X coordinate in screenshot pixel coordinates",
                     "type": "number"
@@ -109,7 +113,8 @@
                   }
                 },
                 "required": [
-                  "app"
+                  "app",
+                  "snapshot_ref"
                 ],
                 "type": "object"
               },
@@ -136,6 +141,10 @@
                     "description": "Start Y coordinate",
                     "type": "number"
                   },
+                  "snapshot_ref": {
+                    "description": "Snapshot reference returned by the immediately preceding get_app_state or action result for this app.",
+                    "type": "string"
+                  },
                   "to_x": {
                     "description": "End X coordinate",
                     "type": "number"
@@ -150,7 +159,8 @@
                   "from_x",
                   "from_y",
                   "to_x",
-                  "to_y"
+                  "to_y",
+                  "snapshot_ref"
                 ],
                 "type": "object"
               },
@@ -163,7 +173,7 @@
                 "openWorldHint": false,
                 "readOnlyHint": true
               },
-              "description": "Get the state of an already running app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`.",
+              "description": "Get the state of an already running app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. The result includes a `snapshot_ref` that identifies the captured window state; pass it to the action tools so they act on this exact state. This tool is part of plugin `Computer Use`.",
               "inputSchema": {
                 "additionalProperties": false,
                 "properties": {
@@ -211,7 +221,7 @@
                 "openWorldHint": false,
                 "readOnlyHint": true
               },
-              "description": "List the apps on this computer. Returns the set of apps that are currently running, as well as any that have been used in the last 14 days, including details on usage frequency. This tool is part of plugin `Computer Use`.",
+              "description": "List the apps on this computer. Returns the set of apps that are currently running, as well as any that have been used in the last 14 days, including details on usage frequency. Call `get_app_state` next to capture a window and obtain the `snapshot_ref` the action tools require. This tool is part of plugin `Computer Use`.",
               "inputSchema": {
                 "additionalProperties": false,
                 "properties": {},
@@ -239,12 +249,17 @@
                   "element_index": {
                     "description": "Element identifier",
                     "type": "string"
+                  },
+                  "snapshot_ref": {
+                    "description": "Snapshot reference returned by the immediately preceding get_app_state or action result for this app.",
+                    "type": "string"
                   }
                 },
                 "required": [
                   "app",
                   "element_index",
-                  "action"
+                  "action",
+                  "snapshot_ref"
                 ],
                 "type": "object"
               },
@@ -266,11 +281,16 @@
                   "key": {
                     "description": "Key or key-combination to press",
                     "type": "string"
+                  },
+                  "snapshot_ref": {
+                    "description": "Snapshot reference returned by the immediately preceding get_app_state or action result for this app.",
+                    "type": "string"
                   }
                 },
                 "required": [
                   "app",
-                  "key"
+                  "key",
+                  "snapshot_ref"
                 ],
                 "type": "object"
               },
@@ -300,12 +320,17 @@
                   "pages": {
                     "description": "Number of pages to scroll. Fractional values are supported. Defaults to 1",
                     "type": "number"
+                  },
+                  "snapshot_ref": {
+                    "description": "Snapshot reference returned by the immediately preceding get_app_state or action result for this app.",
+                    "type": "string"
                   }
                 },
                 "required": [
                   "app",
                   "element_index",
-                  "direction"
+                  "direction",
+                  "snapshot_ref"
                 ],
                 "type": "object"
               },
@@ -328,6 +353,10 @@
                     "description": "Element identifier",
                     "type": "string"
                   },
+                  "snapshot_ref": {
+                    "description": "Snapshot reference returned by the immediately preceding get_app_state or action result for this app.",
+                    "type": "string"
+                  },
                   "value": {
                     "description": "Value to assign",
                     "type": "string"
@@ -336,7 +365,8 @@
                 "required": [
                   "app",
                   "element_index",
-                  "value"
+                  "value",
+                  "snapshot_ref"
                 ],
                 "type": "object"
               },
@@ -355,6 +385,10 @@
                     "description": "App name or bundle identifier",
                     "type": "string"
                   },
+                  "snapshot_ref": {
+                    "description": "Snapshot reference returned by the immediately preceding get_app_state or action result for this app.",
+                    "type": "string"
+                  },
                   "text": {
                     "description": "Literal text to type",
                     "type": "string"
@@ -362,7 +396,8 @@
                 },
                 "required": [
                   "app",
-                  "text"
+                  "text",
+                  "snapshot_ref"
                 ],
                 "type": "object"
               },

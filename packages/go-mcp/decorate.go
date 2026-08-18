@@ -18,7 +18,7 @@ func (s *Server) discoverResult() map[string]any {
 	return map[string]any{
 		"supportedVersions": supportedVersions,
 		"capabilities":      map[string]any{"tools": map[string]any{"listChanged": false}},
-		"instructions":      s.hooks.Instructions,
+		"instructions":      s.hooks.ModernInstructions,
 		"ttlMs":             cacheTTLMs,
 		"cacheScope":        cacheScope,
 	}
