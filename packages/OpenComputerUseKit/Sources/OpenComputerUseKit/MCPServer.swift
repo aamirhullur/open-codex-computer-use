@@ -239,7 +239,7 @@ public final class StdioMCPServer {
             let arguments = params["arguments"] as? [String: Any] ?? [:]
             let result: ToolCallResult
             do {
-                result = try dispatcher.callTool(name: name, arguments: arguments)
+                result = try dispatcher.callTool(name: name, arguments: arguments, modern: true)
             } catch let error as ComputerUseError {
                 result = ToolCallResult.text(error.errorDescription ?? String(describing: error), isError: error.toolResultIsError)
             } catch {

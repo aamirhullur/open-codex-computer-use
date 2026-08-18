@@ -43,7 +43,14 @@ public final class ComputerUseToolDispatcher {
         self.service = service
     }
 
+    // Legacy call path, byte-identical to the pre-M3 behavior. The modern adapter
+    // calls the modern variant so get_app_state mints a real snapshot_ref; every
+    // other tool ignores the era in M3 (actions do not consume handles until M4).
     public func callTool(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        try callTool(name: name, arguments: arguments, modern: false)
+    }
+
+    public func callTool(name: String, arguments: [String: Any], modern: Bool) throws -> ToolCallResult {
         switch name {
         case "list_apps":
             return service.listApps()
@@ -54,7 +61,8 @@ public final class ComputerUseToolDispatcher {
                 treeLimits: AccessibilityTreeLimits.defaults.replacing(
                     maxNodeCount: try optionalPositiveInt("max_tree_nodes", in: arguments),
                     maxDepth: try optionalPositiveInt("max_tree_depth", in: arguments)
-                )
+                ),
+                modern: modern
             )
         case "click":
             return try service.click(

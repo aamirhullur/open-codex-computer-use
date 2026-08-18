@@ -17,7 +17,7 @@ func testHooks() Hooks {
 		ToolCatalog: func(modern bool) any {
 			return []map[string]any{{"name": "list_apps"}, {"name": "get_app_state"}}
 		},
-		CallTool: func(name string, args map[string]any) any {
+		CallTool: func(name string, args map[string]any, modern bool) any {
 			if name == "get_app_state" {
 				if _, ok := args["app"]; !ok {
 					return map[string]any{

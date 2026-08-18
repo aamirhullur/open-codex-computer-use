@@ -157,6 +157,13 @@ private final class MacOSAppAgentRuntime: NSObject, NSApplicationDelegate {
     private let socketPath: String
     private var listener: AppAgentSocketListener?
     private var turnEndedObserver: NSObjectProtocol?
+    // One shared automation runtime for the whole app agent: a single
+    // ComputerUseService owning a single SnapshotHandleStore. Every connection
+    // builds only its own protocol adapter around this, so a snapshot_ref minted on
+    // one socket connection stays resolvable after that connection closes, while a
+    // process restart yields a recoverable unknown-handle error. The store's
+    // internal lock serializes shared access.
+    private let sharedService = ComputerUseService()
 
     private init(socketPath: String) {
         self.socketPath = socketPath
@@ -183,7 +190,7 @@ private final class MacOSAppAgentRuntime: NSObject, NSApplicationDelegate {
         }
 
         do {
-            let listener = try AppAgentSocketListener(path: socketPath)
+            let listener = try AppAgentSocketListener(path: socketPath, service: sharedService)
             self.listener = listener
             listener.start()
         } catch {
@@ -213,9 +220,12 @@ private final class AppAgentSocketListener: @unchecked Sendable {
     private let path: String
     private let socketFD: Int32
     private var running = true
+    // Shared across every accepted connection so handles survive connection close.
+    private let service: ComputerUseService
 
-    init(path: String) throws {
+    init(path: String, service: ComputerUseService) throws {
         self.path = path
+        self.service = service
         unlink(path)
 
         socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -283,8 +293,8 @@ private final class AppAgentSocketListener: @unchecked Sendable {
                 continue
             }
 
-            Thread.detachNewThread {
-                AppAgentConnection(fileDescriptor: clientFD).run()
+            Thread.detachNewThread { [service] in
+                AppAgentConnection(fileDescriptor: clientFD, service: service).run()
             }
         }
     }
@@ -292,10 +302,13 @@ private final class AppAgentSocketListener: @unchecked Sendable {
 
 private final class AppAgentConnection: @unchecked Sendable {
     private let fileDescriptor: Int32
-    private let server = StdioMCPServer()
+    // Protocol adapter only; the automation runtime (service + handle store) is the
+    // shared instance injected from MacOSAppAgentRuntime.
+    private let server: StdioMCPServer
 
-    init(fileDescriptor: Int32) {
+    init(fileDescriptor: Int32, service: ComputerUseService) {
         self.fileDescriptor = fileDescriptor
+        self.server = StdioMCPServer(service: service)
     }
 
     func run() {

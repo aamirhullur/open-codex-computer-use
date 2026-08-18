@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -193,13 +196,39 @@ type psResponse struct {
 
 type service struct {
 	snapshots map[string]*appSnapshot
+	// store owns the modern-era snapshot handles. It is process-lifetime state;
+	// the legacy snapshots map above is untouched and still backs the legacy era.
+	store *gomcp.SnapshotStore[*appSnapshot]
+	// runner executes a runtime request. Production is runPowerShell; tests
+	// inject a canned runner so the modern get_app_state path is exercised
+	// without Windows. The production path stays byte-identical for legacy.
+	runner func(psRequest) (*psResponse, error)
+}
+
+// snapshotStoreLogger writes the store's redacted lifecycle lines to stderr,
+// gated on OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS exactly like the Swift
+// defaultLogSink (any value, including empty, enables it). Stdout stays pure
+// JSON-RPC.
+func snapshotStoreLogger(line string) {
+	writeSnapshotDebugLine(os.Stderr, line)
+}
+
+func writeSnapshotDebugLine(w io.Writer, line string) {
+	if _, ok := os.LookupEnv("OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS"); !ok {
+		return
+	}
+	fmt.Fprintln(w, line)
 }
 
 func newService() *service {
-	return &service{snapshots: map[string]*appSnapshot{}}
+	return &service{
+		snapshots: map[string]*appSnapshot{},
+		store:     gomcp.NewSnapshotStore[*appSnapshot](nil, nil, snapshotStoreLogger),
+		runner:    runPowerShell,
+	}
 }
 
-func (s *service) callTool(name string, args map[string]any) toolCallResult {
+func (s *service) callTool(name string, args map[string]any, modern bool) toolCallResult {
 	switch name {
 	case "list_apps":
 		return s.listApps()
@@ -216,7 +245,7 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 		if err != nil {
 			return textResult(err.Error(), true)
 		}
-		return s.getAppState(requiredString(args, "app"), textLimit, maxTreeNodes, maxTreeDepth)
+		return s.getAppState(requiredString(args, "app"), textLimit, maxTreeNodes, maxTreeDepth, modern)
 	case "click":
 		clickMethod, err := parseClickMethod(optionalString(args, "click_method"))
 		if err != nil {
@@ -264,7 +293,7 @@ func (s *service) callTool(name string, args map[string]any) toolCallResult {
 }
 
 func (s *service) listApps() toolCallResult {
-	response, err := runPowerShell(psRequest{Tool: "list_apps"})
+	response, err := s.runner(psRequest{Tool: "list_apps"})
 	if err != nil {
 		return textResult(err.Error(), true)
 	}
@@ -277,7 +306,7 @@ func (s *service) listApps() toolCallResult {
 	return textResult(response.Text, false)
 }
 
-func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, maxTreeDepth *int) toolCallResult {
+func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, maxTreeDepth *int, modern bool) toolCallResult {
 	if app == "" {
 		return textResult("Missing required argument: app", true)
 	}
@@ -295,7 +324,40 @@ func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, ma
 	if result.IsError {
 		return result
 	}
+	if modern {
+		state, err := s.mintSnapshotState(snapshot)
+		if err != nil {
+			// Minting failed (only when the token source fails). Deliver the
+			// capture as a legacy-shaped result with no snapshot_ref rather than
+			// emitting an empty handle, and record the store error on the gated
+			// debug sink.
+			snapshotStoreLogger("snapshot mint failed: " + err.Error())
+			return snapshot.result()
+		}
+		return snapshot.modernStateResult(state)
+	}
 	return snapshot.result()
+}
+
+// mintSnapshotState mints a real handle for the captured snapshot and returns the
+// structured state block for the modern get_app_state result. The store owns the
+// snapshot payload (screenshot bytes and element records) until it expires or is
+// superseded; the metadata kept here carries no accessibility text.
+func (s *service) mintSnapshotState(snapshot *appSnapshot) (gomcp.StructuredState, error) {
+	meta := gomcp.SnapshotMeta{
+		AppName:          snapshot.App.Name,
+		BundleIdentifier: snapshot.App.BundleIdentifier,
+		PID:              snapshot.App.PID,
+		Bounds:           rectFromFrame(snapshot.WindowBounds),
+		ScreenshotPixels: pngPixelSize(snapshot.ScreenshotPNGBase64),
+		Mode:             "real",
+	}
+	target := gomcp.TargetKey{App: snapshotTargetIdentity(snapshot)}
+	record, err := s.store.Mint(target, snapshot, meta)
+	if err != nil {
+		return gomcp.StructuredState{}, err
+	}
+	return snapshotState(record.Handle, record.CreatedAt, record.ExpiresAt, record.Generation, record.Meta), nil
 }
 
 func (s *service) click(app, elementIndex string, x, y *float64, clickCount int, mouseButton, clickMethod string) toolCallResult {
@@ -464,7 +526,7 @@ func (s *service) currentSnapshot(app string) *appSnapshot {
 }
 
 func (s *service) refreshSnapshot(app string, request psRequest) (*appSnapshot, toolCallResult) {
-	response, err := runPowerShell(request)
+	response, err := s.runner(request)
 	if err != nil {
 		return nil, textResult(err.Error(), true)
 	}
@@ -861,6 +923,85 @@ func (s *appSnapshot) modernStateResult(state gomcp.StructuredState) toolCallRes
 	return result
 }
 
+// snapshotTargetIdentity is the normalized app identity that keys a store target:
+// the bundle/executable identity when present, otherwise the app name, lowercased
+// to match the legacy snapshot key normalization.
+func snapshotTargetIdentity(snapshot *appSnapshot) string {
+	identity := snapshot.App.BundleIdentifier
+	if strings.TrimSpace(identity) == "" {
+		identity = snapshot.App.Name
+	}
+	return strings.ToLower(strings.TrimSpace(identity))
+}
+
+// snapshotState assembles the modern structuredContent values from a minted
+// record's fields and stored metadata.
+func snapshotState(handle string, createdAt, expiresAt time.Time, generation int, meta gomcp.SnapshotMeta) gomcp.StructuredState {
+	return gomcp.StructuredState{
+		SnapshotRef:      handle,
+		CapturedAt:       rfc3339UTC(createdAt),
+		ExpiresAt:        rfc3339UTC(expiresAt),
+		Generation:       generation,
+		AppName:          meta.AppName,
+		BundleIdentifier: optString(meta.BundleIdentifier),
+		PID:              meta.PID,
+		WindowID:         optString(meta.WindowID),
+		Bounds:           meta.Bounds,
+		ScreenshotPixels: meta.ScreenshotPixels,
+	}
+}
+
+func rfc3339UTC(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func optString(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
+}
+
+func rectFromFrame(f *frame) gomcp.Rect {
+	if f == nil {
+		return gomcp.Rect{}
+	}
+	return gomcp.Rect{X: f.X, Y: f.Y, Width: f.Width, Height: f.Height}
+}
+
+// pngPixelSize reads the screenshot's pixel dimensions from the PNG IHDR header.
+// The Windows runtime returns only base64 PNG bytes with no explicit dimensions,
+// so the width and height are derived from the header here. It returns nil when
+// the screenshot is absent or not a parseable PNG.
+func pngPixelSize(b64 string) *gomcp.Size {
+	if b64 == "" {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(data) < 24 {
+		return nil
+	}
+	// PNG signature (8 bytes) + IHDR chunk length (4, always 13) + "IHDR" (4)
+	// then the big-endian width (4) and height (4). Validate the signature and
+	// chunk length so a non-PNG blob with a coincidental "IHDR" at offset 12 is
+	// rejected rather than yielding bogus dimensions.
+	if !bytes.Equal(data[0:8], []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}) {
+		return nil
+	}
+	if binary.BigEndian.Uint32(data[8:12]) != 13 || string(data[12:16]) != "IHDR" {
+		return nil
+	}
+	width := int(binary.BigEndian.Uint32(data[16:20]))
+	height := int(binary.BigEndian.Uint32(data[20:24]))
+	if width <= 0 || height <= 0 {
+		return nil
+	}
+	return &gomcp.Size{Width: width, Height: height}
+}
+
 func objectSchema(properties map[string]any, required []string) map[string]any {
 	schema := map[string]any{
 		"type":                 "object",
@@ -943,7 +1084,7 @@ func runCLI(args []string, stdout io.Writer) error {
 		fmt.Fprintln(stdout, "Windows runtime: UI Automation and Win32 window-message bridge are available when this process runs in the signed-in desktop session.")
 		return nil
 	case "list-apps":
-		result := newService().callTool("list_apps", map[string]any{})
+		result := newService().callTool("list_apps", map[string]any{}, false)
 		if result.IsError {
 			return errors.New(result.Content[0].Text)
 		}
@@ -966,7 +1107,7 @@ func runCLI(args []string, stdout io.Writer) error {
 		if maxTreeDepth != nil {
 			toolArgs["max_tree_depth"] = *maxTreeDepth
 		}
-		result := newService().callTool("get_app_state", toolArgs)
+		result := newService().callTool("get_app_state", toolArgs, false)
 		if result.IsError {
 			return errors.New(result.Content[0].Text)
 		}
@@ -1119,7 +1260,7 @@ func runCallCommand(args []string, svc *service) (any, bool, error) {
 		var outputs []map[string]any
 		hasError := false
 		for _, call := range calls {
-			result := svc.callTool(call.Tool, call.Args)
+			result := svc.callTool(call.Tool, call.Args, false)
 			outputs = append(outputs, map[string]any{"tool": call.Tool, "result": result})
 			if result.IsError {
 				hasError = true
@@ -1136,7 +1277,7 @@ func runCallCommand(args []string, svc *service) (any, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	result := svc.callTool(toolName, arguments)
+	result := svc.callTool(toolName, arguments, false)
 	return result, result.IsError, nil
 }
 
@@ -1228,7 +1369,7 @@ func mcpServer() *gomcp.Server {
 		ModernInstructions: modernServerInstructions,
 		Version:            version,
 		ToolCatalog:        func(modern bool) any { return toolDefinitionsForEra(modern) },
-		CallTool:           func(name string, args map[string]any) any { return svc.callTool(name, args) },
+		CallTool:           func(name string, args map[string]any, modern bool) any { return svc.callTool(name, args, modern) },
 	})
 }
 

@@ -412,10 +412,29 @@ func shouldPreferContainingWebRowAXClickCandidate(
     return role == kAXStaticTextRole as String || role == kAXGroupRole as String || isSyntheticText
 }
 
-public final class ComputerUseService {
+// @unchecked Sendable: the only mutable state is snapshotsByApp (guarded by
+// cacheLock) and snapshotHandleStore (internally locked). The app agent shares one
+// instance across connection threads; native accessibility calls run on their
+// existing execution context and are not new shared state.
+public final class ComputerUseService: @unchecked Sendable {
     private var snapshotsByApp: [String: AppSnapshot] = [:]
+    // Guards snapshotsByApp only. Once the app agent shares one service across
+    // connection threads (M3 ownership hoist), the legacy cache is shared mutable
+    // state; native capture stays off this lock to avoid holding it during slow
+    // accessibility calls.
+    private let cacheLock = NSLock()
+    // Owns the modern snapshot_ref mapping. Defaults to a process-local store so a
+    // single-process service mints on its own; the app agent injects one shared
+    // store so handles outlive individual connections.
+    private let snapshotHandleStore: SnapshotHandleStore
 
-    public init() {}
+    public init(snapshotHandleStore: SnapshotHandleStore = SnapshotHandleStore()) {
+        self.snapshotHandleStore = snapshotHandleStore
+    }
+
+    // Exposed so the app-agent ownership hoist and tests can resolve handles minted
+    // through this service without reaching into private state.
+    public var handleStore: SnapshotHandleStore { snapshotHandleStore }
 
     public func listApps() -> ToolCallResult {
         ToolCallResult.text(
@@ -428,9 +447,62 @@ public final class ComputerUseService {
     public func getAppState(
         app query: String,
         textLimit: SnapshotTextLimit = .defaults,
-        treeLimits: AccessibilityTreeLimits = .defaults
+        treeLimits: AccessibilityTreeLimits = .defaults,
+        modern: Bool = false
     ) throws -> ToolCallResult {
-        snapshotResult(for: try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits), style: .fullState)
+        let snapshot = try refreshSnapshot(for: query, textLimit: textLimit, treeLimits: treeLimits)
+        return snapshotStateResult(
+            for: snapshot,
+            modern: modern,
+            captureOptions: SnapshotCaptureOptions(
+                textLimitMaxCount: textLimit.maxCount,
+                maxTreeNodes: treeLimits.maxNodeCount,
+                maxTreeDepth: treeLimits.maxDepth
+            )
+        )
+    }
+
+    // Builds the get_app_state result for one captured snapshot. In the modern era
+    // it mints a real handle into the store and returns the M2 structured content
+    // plus the snapshot_ref text prefix; the legacy era returns the pre-existing
+    // text+image result byte-identically. Internal so unit tests can drive the mint
+    // path with a fixture-style snapshot without live capture.
+    func snapshotStateResult(
+        for snapshot: AppSnapshot,
+        modern: Bool,
+        captureOptions: SnapshotCaptureOptions
+    ) -> ToolCallResult {
+        guard modern else {
+            return snapshotResult(for: snapshot, style: .fullState)
+        }
+
+        let screenshotPixels = screenshotPixelSize(snapshot: snapshot)
+        do {
+            let minted = try snapshotHandleStore.mint(
+                snapshot: snapshot,
+                screenshotPixels: screenshotPixels,
+                captureOptions: captureOptions
+            )
+            return SnapshotStructuredContent.result(
+                snapshot: snapshot,
+                snapshotRef: minted.handle,
+                capturedAt: minted.capturedAt,
+                expiresAt: minted.expiresAt,
+                generation: minted.generation,
+                screenshotPixels: screenshotPixels
+            )
+        } catch {
+            // Mint failed (e.g. no entropy). Deliver the capture with no structured
+            // block and no snapshot_ref text prefix; the client recovers by
+            // recapturing. Log to the gated debug sink only, never stdout.
+            logStoreDebug("get_app_state mint failed: \(String(describing: error))")
+            return snapshotResult(for: snapshot, style: .fullState)
+        }
+    }
+
+    private func logStoreDebug(_ message: String) {
+        guard ProcessInfo.processInfo.environment["OPEN_COMPUTER_USE_DEBUG_INPUT_FALLBACKS"] != nil else { return }
+        FileHandle.standardError.write(Data(("snapshot-store " + message + "\n").utf8))
     }
 
     public func click(
@@ -789,8 +861,11 @@ public final class ComputerUseService {
     }
 
     private func currentSnapshot(for query: String) throws -> AppSnapshot {
-        if let snapshot = snapshotsByApp[query.lowercased()] {
-            return snapshot
+        cacheLock.lock()
+        let cached = snapshotsByApp[query.lowercased()]
+        cacheLock.unlock()
+        if let cached {
+            return cached
         }
 
         return try refreshSnapshot(for: query)
@@ -817,9 +892,11 @@ public final class ComputerUseService {
             (app.bundleIdentifier ?? "").lowercased(),
         ].filter { !$0.isEmpty })
 
+        cacheLock.lock()
         for key in keys {
             snapshotsByApp[key] = snapshot
         }
+        cacheLock.unlock()
 
         return snapshot
     }

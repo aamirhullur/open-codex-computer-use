@@ -23,8 +23,10 @@ type Hooks struct {
 	// the modern catalog whose action tools require snapshot_ref.
 	ToolCatalog func(modern bool) any
 	// CallTool dispatches a tool call and returns its result value (a
-	// marshalable tool result).
-	CallTool func(name string, args map[string]any) any
+	// marshalable tool result). modern reports the connection era so a handler
+	// can take the modern path (minting a snapshot handle and returning the
+	// structured block) while keeping the legacy result byte-identical.
+	CallTool func(name string, args map[string]any, modern bool) any
 	// TurnEnded is an optional best-effort cleanup hook for the
 	// notifications/turn-ended custom notification. It may be nil.
 	TurnEnded func()
@@ -160,12 +162,13 @@ func (s *Server) handleModern(id any, method string, params map[string]any) map[
 	}
 }
 
-// callTool extracts the tool name and arguments and dispatches through the hook.
+// callTool extracts the tool name and arguments and dispatches through the hook,
+// passing the connection era so the handler can select the modern path.
 func (s *Server) callTool(params map[string]any) any {
 	name, _ := params["name"].(string)
 	arguments, _ := params["arguments"].(map[string]any)
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
-	return s.hooks.CallTool(name, arguments)
+	return s.hooks.CallTool(name, arguments, s.era == eraModern)
 }
