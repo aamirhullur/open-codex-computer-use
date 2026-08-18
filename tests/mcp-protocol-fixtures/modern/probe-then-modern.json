@@ -1,0 +1,84 @@
+{
+  "name": "modern-probe-then-modern-calls",
+  "description": "A modern probe (server/discover) followed by ordinary modern calls (tools/list, tools/call) without any initialize. Every step must return a modern-decorated result. Target from design sections Era classification and Testing strategy. Currently unimplemented: at least the first step returns -32601, so this sequence mismatches.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 110,
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 110,
+        "result": {
+          "resultType": "complete",
+          "supportedVersions": ["2026-07-28", "2025-03-26"],
+          "capabilities": {"tools": {"listChanged": false}},
+          "instructions": "<INSTRUCTIONS>",
+          "ttlMs": 300000,
+          "cacheScope": "public",
+          "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "open-computer-use", "version": "<VERSION>"}}
+        }
+      }
+    },
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 111,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {"tools": {}},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 111,
+        "result": {
+          "resultType": "complete",
+          "tools": "<MODERN_TOOL_LIST>",
+          "ttlMs": 300000,
+          "cacheScope": "public",
+          "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "open-computer-use", "version": "<VERSION>"}}
+        }
+      }
+    },
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 112,
+        "method": "tools/call",
+        "params": {
+          "name": "get_app_state",
+          "arguments": {},
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 112,
+        "result": {
+          "resultType": "complete",
+          "content": [{"type": "text", "text": "Missing required argument: app"}],
+          "isError": true,
+          "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "open-computer-use", "version": "<VERSION>"}}
+        }
+      }
+    }
+  ]
+}

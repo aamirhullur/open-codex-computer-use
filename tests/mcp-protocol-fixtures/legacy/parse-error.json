@@ -1,0 +1,10 @@
+{
+  "name": "parse-error",
+  "description": "A line that parses as JSON but is not a JSON-RPC object returns -32700 with a null id. request_raw is a verbatim line ([]) fed to the decoder. This input is chosen because it produces an identical -32700 on all three platforms; see the README note about Swift's divergent handling of truly malformed (unparseable) JSON.",
+  "steps": [
+    {
+      "request_raw": "[]",
+      "expect": {"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Invalid JSON-RPC payload"}}
+    }
+  ]
+}

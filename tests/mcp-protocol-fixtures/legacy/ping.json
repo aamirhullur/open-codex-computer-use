@@ -1,0 +1,10 @@
+{
+  "name": "ping",
+  "description": "Legacy ping returns an empty result object. Cross-platform identical.",
+  "steps": [
+    {
+      "request": {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+      "expect": {"jsonrpc": "2.0", "id": 2, "result": {}}
+    }
+  ]
+}

@@ -24,12 +24,14 @@ done < <(find "${repo_root}/scripts" -type f -name '*.mjs' | sort)
 if command -v go >/dev/null 2>&1; then
   (
     cd "${repo_root}/apps/OpenComputerUseWindows"
-    go test ./...
+    go test -count=1 ./...
   )
   (
     cd "${repo_root}/apps/OpenComputerUseLinux"
-    go test ./...
+    go test -count=1 ./...
   )
 fi
+
+"${repo_root}/scripts/test-mcp-protocol-fixtures.sh"
 
 echo "基础 CI 检查通过"

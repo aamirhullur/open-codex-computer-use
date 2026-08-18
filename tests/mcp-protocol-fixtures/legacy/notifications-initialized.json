@@ -1,0 +1,10 @@
+{
+  "name": "notifications-initialized",
+  "description": "notifications/initialized is a legacy notification and produces no response. Cross-platform identical.",
+  "steps": [
+    {
+      "request": {"jsonrpc": "2.0", "method": "notifications/initialized"},
+      "expect": null
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "bare-response",
+  "description": "A payload with no method (e.g. a stray JSON-RPC response) is dropped and produces no output. Cross-platform identical.",
+  "steps": [
+    {
+      "request": {"jsonrpc": "2.0", "id": 6, "result": {}},
+      "expect": null
+    }
+  ]
+}

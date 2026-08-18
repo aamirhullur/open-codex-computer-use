@@ -1,0 +1,10 @@
+{
+  "name": "tools-call-missing-app",
+  "description": "tools/call get_app_state with no app returns a tool result with isError true. This is the deterministic stand-in for a list_apps success case: it exercises the tools/call result envelope but fails argument validation before capturing any real UI, so it is stable across platforms and process runs. Cross-platform identical.",
+  "steps": [
+    {
+      "request": {"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "get_app_state", "arguments": {}}},
+      "expect": {"jsonrpc": "2.0", "id": 11, "result": {"isError": true, "content": [{"type": "text", "text": "Missing required argument: app"}]}}
+    }
+  ]
+}

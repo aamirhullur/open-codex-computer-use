@@ -1,0 +1,34 @@
+{
+  "name": "modern-tools-call-meta",
+  "description": "Direct modern tools/call with per-request _meta returns a result decorated with resultType complete and result _meta serverInfo. Uses get_app_state with no app so the case stays deterministic and never captures real UI. Currently unimplemented: handlers return the bare legacy tool result, so this mismatches.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 102,
+        "method": "tools/call",
+        "params": {
+          "name": "get_app_state",
+          "arguments": {},
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 102,
+        "result": {
+          "resultType": "complete",
+          "content": [{"type": "text", "text": "Missing required argument: app"}],
+          "isError": true,
+          "_meta": {
+            "io.modelcontextprotocol/serverInfo": {"name": "open-computer-use", "version": "<VERSION>"}
+          }
+        }
+      }
+    }
+  ]
+}

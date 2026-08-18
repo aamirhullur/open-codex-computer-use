@@ -1,0 +1,29 @@
+{
+  "name": "modern-unsupported-version",
+  "description": "A modern request naming an unsupported protocolVersion returns JSON-RPC -32022 with data.supported and data.requested. Target from design section Modern request envelope. Currently unimplemented: handlers ignore _meta and serve the request, so this mismatches.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 104,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "1999-01-01",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 104,
+        "error": {
+          "code": -32022,
+          "message": "Unsupported protocol version",
+          "data": {"supported": ["2026-07-28", "2025-03-26"], "requested": "1999-01-01"}
+        }
+      }
+    }
+  ]
+}

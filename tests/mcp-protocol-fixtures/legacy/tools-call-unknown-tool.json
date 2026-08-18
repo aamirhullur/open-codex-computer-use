@@ -1,0 +1,10 @@
+{
+  "name": "tools-call-unknown-tool",
+  "description": "tools/call for an unknown tool returns a tool result with isError true (not a JSON-RPC error). Fails inside the dispatcher before touching any UI, so it is deterministic. Cross-platform identical.",
+  "steps": [
+    {
+      "request": {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "does_not_exist", "arguments": {}}},
+      "expect": {"jsonrpc": "2.0", "id": 4, "result": {"isError": true, "content": [{"type": "text", "text": "unsupportedTool(\"does_not_exist\")"}]}}
+    }
+  ]
+}

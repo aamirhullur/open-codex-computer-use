@@ -1,0 +1,10 @@
+{
+  "name": "unknown-method",
+  "description": "An unknown method returns JSON-RPC -32601 with the method name echoed. Cross-platform identical.",
+  "steps": [
+    {
+      "request": {"jsonrpc": "2.0", "id": 5, "method": "no/such/method"},
+      "expect": {"jsonrpc": "2.0", "id": 5, "error": {"code": -32601, "message": "Method not found: no/such/method"}}
+    }
+  ]
+}

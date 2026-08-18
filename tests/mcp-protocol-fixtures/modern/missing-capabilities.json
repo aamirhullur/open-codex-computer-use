@@ -1,0 +1,24 @@
+{
+  "name": "modern-missing-capabilities",
+  "description": "A modern request whose _meta carries the required protocolVersion but omits the required clientCapabilities returns JSON-RPC -32602 Invalid params. Target from design section Modern request envelope. Currently unimplemented: handlers ignore _meta and serve the request, so this mismatches.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 107,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 107,
+        "error": {"code": -32602, "message": "Invalid params"}
+      }
+    }
+  ]
+}

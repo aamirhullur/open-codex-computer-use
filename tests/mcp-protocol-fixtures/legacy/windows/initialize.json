@@ -1,0 +1,38 @@
+{
+  "name": "initialize-windows",
+  "description": "Legacy initialize handshake on windows; serverInfo.version normalized. Frozen verbatim including platform-specific instructions.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-03-26",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "probe",
+            "version": "0"
+          }
+        }
+      },
+      "expect": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {
+              "listChanged": false
+            }
+          },
+          "instructions": "Computer Use tools let you interact with Windows apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Windows actions use UI Automation patterns first and fall back to window messages when an app does not expose the needed pattern. The Windows runtime does not auto-launch apps, perform SetFocus, or use UIA text fallback by default, so background-capable actions do not intentionally steal the user's foreground focus.",
+          "protocolVersion": "2025-03-26",
+          "serverInfo": {
+            "name": "open-computer-use",
+            "version": "<VERSION>"
+          }
+        }
+      }
+    }
+  ]
+}

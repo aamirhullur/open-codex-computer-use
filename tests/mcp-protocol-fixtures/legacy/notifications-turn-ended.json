@@ -1,0 +1,10 @@
+{
+  "name": "notifications-turn-ended",
+  "description": "notifications/turn-ended is a best-effort cleanup notification and produces no response in either era. Cross-platform identical.",
+  "steps": [
+    {
+      "request": {"jsonrpc": "2.0", "method": "notifications/turn-ended"},
+      "expect": null
+    }
+  ]
+}

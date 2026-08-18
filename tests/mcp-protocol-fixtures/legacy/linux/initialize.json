@@ -1,0 +1,38 @@
+{
+  "name": "initialize-linux",
+  "description": "Legacy initialize handshake on linux; serverInfo.version normalized. Frozen verbatim including platform-specific instructions.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+          "protocolVersion": "2025-03-26",
+          "capabilities": {},
+          "clientInfo": {
+            "name": "probe",
+            "version": "0"
+          }
+        }
+      },
+      "expect": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {
+              "listChanged": false
+            }
+          },
+          "instructions": "Computer Use tools let you interact with Linux desktop apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Linux actions use AT-SPI2 semantic actions and editable text APIs first. Coordinate mouse and key synthesis are best-effort fallbacks and are not a universal Wayland background input model.",
+          "protocolVersion": "2025-03-26",
+          "serverInfo": {
+            "name": "open-computer-use",
+            "version": "<VERSION>"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "modern-deterministic-tool-order",
+  "description": "Modern tools/list returns tools in the checked-in definition order with cache hints. In M2 the tools placeholder becomes the frozen ordered modern catalog. Target from design section Tool-list caching. Currently unimplemented: handlers return the legacy tools/list with no resultType or cache hints, so this mismatches.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 120,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 120,
+        "result": {
+          "resultType": "complete",
+          "tools": "<MODERN_TOOL_LIST>",
+          "ttlMs": 300000,
+          "cacheScope": "public",
+          "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "open-computer-use", "version": "<VERSION>"}}
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "modern-rejects-ping",
+  "description": "Modern mode does not advertise or implement the removed ping method and rejects it. Target from design section Supported methods. Currently unimplemented: handlers ignore _meta and return the legacy empty ping result, so this mismatches.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 106,
+        "method": "ping",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 106,
+        "error": {"code": -32601, "message": "Method not found: ping"}
+      }
+    }
+  ]
+}
