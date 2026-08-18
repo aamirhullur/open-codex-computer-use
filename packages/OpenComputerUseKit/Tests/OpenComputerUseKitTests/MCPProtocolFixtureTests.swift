@@ -120,7 +120,7 @@ final class MCPProtocolFixtureTests: XCTestCase {
             return []
         }
         let files = contents
-            .filter { $0.pathExtension == "json" && $0.lastPathComponent != "EXPECTED_FAILURES.json" }
+            .filter { $0.pathExtension == "json" && !$0.lastPathComponent.hasPrefix("EXPECTED_FAILURES") }
             .sorted { $0.path < $1.path }
         XCTAssertFalse(files.isEmpty, "no fixture files in \(dir.path)")
         return files
@@ -147,7 +147,7 @@ final class MCPProtocolFixtureTests: XCTestCase {
     // MARK: - Modern
 
     private func expectedFailures() -> [String: String] {
-        let url = Self.fixturesRoot.appendingPathComponent("modern/EXPECTED_FAILURES.json")
+        let url = Self.fixturesRoot.appendingPathComponent("modern/EXPECTED_FAILURES.\(Self.platformDir).json")
         let data = try! Data(contentsOf: url)
         let object = try! JSONSerialization.jsonObject(with: data) as? [String: Any]
         return (object?["cases"] as? [String: String]) ?? [:]
@@ -179,12 +179,12 @@ final class MCPProtocolFixtureTests: XCTestCase {
             if manifest[fixture.name] != nil {
                 XCTAssertFalse(
                     allMatch,
-                    "modern case \(fixture.name) now matches its target shape; remove it from modern/EXPECTED_FAILURES.json"
+                    "modern case \(fixture.name) now matches its target shape; remove it from modern/EXPECTED_FAILURES.\(Self.platformDir).json"
                 )
             } else {
                 XCTAssertTrue(
                     allMatch,
-                    "modern case \(fixture.name) is not in EXPECTED_FAILURES.json but does not match its target shape"
+                    "modern case \(fixture.name) is not in EXPECTED_FAILURES.\(Self.platformDir).json but does not match its target shape"
                 )
             }
         }
@@ -192,7 +192,7 @@ final class MCPProtocolFixtureTests: XCTestCase {
         // Guard against manifest rot in the reverse direction: every listed key
         // must name a modern fixture that actually exists.
         for name in manifest.keys where !discovered.contains(name) {
-            XCTFail("EXPECTED_FAILURES.json lists \(name) but no modern fixture has that name")
+            XCTFail("EXPECTED_FAILURES.\(Self.platformDir).json lists \(name) but no modern fixture has that name")
         }
     }
 }

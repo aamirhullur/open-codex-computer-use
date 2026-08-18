@@ -1,5 +1,5 @@
 {
-  "description": "Modern 2026-07-28 fixtures that the current handlers do not yet implement. Each entry maps a modern case name (the fixture's name field) to the reason it currently mismatches its target shape. A runner treats a listed case as passing while it mismatches, and fails if the case unexpectedly matches (a signal the feature landed and the entry should be removed). Entries are retired as M1 and M2 implement the modern era.",
+  "description": "Modern 2026-07-28 fixtures that the current handlers do not yet implement. Each entry maps a modern case name (the fixture's name field) to the reason it currently mismatches its target shape. A runner treats a listed case as passing while it mismatches, and fails if the case unexpectedly matches (a signal the feature landed and the entry should be removed). Entries are retired per platform as M1 and M2 implement the modern era on it.",
   "cases": {
     "modern-server-discover": "server/discover is not implemented until M1; handlers return -32601.",
     "modern-tools-list-meta": "Modern response decoration (resultType, cache hints, result _meta) is not implemented until M1.",

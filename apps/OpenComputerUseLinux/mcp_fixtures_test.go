@@ -183,7 +183,7 @@ func fixtureFiles(t *testing.T, dir string) []string {
 		if filepath.Ext(name) != ".json" {
 			continue
 		}
-		if name == "EXPECTED_FAILURES.json" {
+		if strings.HasPrefix(name, "EXPECTED_FAILURES") {
 			continue
 		}
 		files = append(files, filepath.Join(dir, name))
@@ -229,7 +229,7 @@ type expectedFailures struct {
 
 func loadExpectedFailures(t *testing.T) expectedFailures {
 	t.Helper()
-	path := filepath.Join(fixturesRoot, "modern", "EXPECTED_FAILURES.json")
+	path := filepath.Join(fixturesRoot, "modern", "EXPECTED_FAILURES."+fixturePlatformDir+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
@@ -242,7 +242,7 @@ func loadExpectedFailures(t *testing.T) expectedFailures {
 }
 
 // TestMCPProtocolFixturesModern runs the modern 2026-07-28 target fixtures.
-// A case listed in EXPECTED_FAILURES.json is required to currently mismatch its
+// A case listed in this platform's EXPECTED_FAILURES manifest is required to currently mismatch its
 // target shape (proving the case executes and the feature is not yet
 // implemented); if it unexpectedly matches, the test fails so the manifest entry
 // is retired. A modern case absent from the manifest is enforced like a legacy
@@ -270,12 +270,12 @@ func TestMCPProtocolFixturesModern(t *testing.T) {
 			_, expectedFail := ef.Cases[c.Name]
 			if expectedFail {
 				if allMatch {
-					t.Errorf("modern case %q now matches its target shape; remove it from modern/EXPECTED_FAILURES.json", c.Name)
+					t.Errorf("modern case %q now matches its target shape; remove it from this platform's modern/EXPECTED_FAILURES manifest", c.Name)
 				}
 				return
 			}
 			if !allMatch {
-				t.Errorf("modern case %q is not in EXPECTED_FAILURES.json but does not match its target shape", c.Name)
+				t.Errorf("modern case %q is not in this platform's EXPECTED_FAILURES manifest but does not match its target shape", c.Name)
 			}
 		})
 	}
@@ -283,7 +283,7 @@ func TestMCPProtocolFixturesModern(t *testing.T) {
 	// name a modern fixture that actually exists.
 	for name := range ef.Cases {
 		if !discovered[name] {
-			t.Errorf("EXPECTED_FAILURES.json lists %q but no modern fixture has that name", name)
+			t.Errorf("the EXPECTED_FAILURES manifest lists %q but no modern fixture has that name", name)
 		}
 	}
 }

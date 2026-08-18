@@ -25,7 +25,7 @@ tests/mcp-protocol-fixtures/
   legacy/linux/          legacy cases specific to the Linux handler
   legacy/windows/        legacy cases specific to the Windows handler
   modern/                modern 2026-07-28 target cases (currently expected-fail)
-  modern/EXPECTED_FAILURES.json
+  modern/EXPECTED_FAILURES.<platform>.json
 ```
 
 The interface contract asks for `legacy/` and `modern/` subdirs. The per-platform
@@ -110,7 +110,7 @@ protocol behavior", "server/discover", and "Tool-list caching"). The current
 handlers do not implement the modern era, so every modern case currently
 mismatches its target shape.
 
-`modern/EXPECTED_FAILURES.json` maps each modern case `name` to the reason it
+Per-platform manifests `modern/EXPECTED_FAILURES.<platform>.json` (macos, linux, windows) map each modern case `name` to the reason it
 currently fails. A runner:
 
 - treats a listed case as passing while it mismatches (proving the case executes
@@ -130,7 +130,7 @@ This keeps the suite green at M0 and flips it to enforcing as M1 and M2 land.
 Where a modern case includes platform-specific text (instructions, tool
 descriptions), the target uses a placeholder (`<INSTRUCTIONS>`,
 `<MODERN_TOOL_LIST>`); those placeholders are refined into per-platform frozen
-values when the corresponding case leaves `EXPECTED_FAILURES.json`.
+values when the corresponding case leaves that platform's EXPECTED_FAILURES manifest.
 
 ## Regenerating
 
