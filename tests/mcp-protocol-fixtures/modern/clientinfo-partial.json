@@ -1,0 +1,25 @@
+{
+  "name": "modern-clientinfo-partial",
+  "description": "A modern request whose _meta clientInfo is present but omits the required version returns JSON-RPC -32602 Invalid params. clientInfo is optional, but when present both name and version are required strings. Cross-platform identical: the error is code and message only, so it lives in the shared modern/ directory.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 108,
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 108,
+        "error": {"code": -32602, "message": "Invalid params"}
+      }
+    }
+  ]
+}

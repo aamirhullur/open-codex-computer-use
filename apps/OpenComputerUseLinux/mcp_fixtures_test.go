@@ -4,12 +4,12 @@ package main
 //
 // This file is a deliberate mirror copy of the same runner in
 // apps/OpenComputerUseWindows/mcp_fixtures_test.go. The only intended
-// difference between the two copies is fixturePlatformDir below. The shared
-// logic is extracted into a common Go package in M1; until then the duplication
-// is intentional so M0 can freeze behavior without introducing a shared module.
+// difference between the two copies is fixturePlatformDir below. The runner is
+// kept per-app (rather than shared) so each binary drives its own toolDefinitions
+// and instructions through the shared gomcp package.
 //
-// The runner drives handleMCPRequest directly (the in-process entry point) and
-// compares normalized JSON against golden fixtures under
+// The runner drives the shared gomcp.Server (built by mcpServer()) via its
+// Handle entry point and compares normalized JSON against golden fixtures under
 // ../../tests/mcp-protocol-fixtures. See that directory's README.md for the
 // fixture format and normalization rules.
 
@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/iFurySt/open-codex-computer-use/packages/gomcp"
 )
 
 // fixturePlatformDir names the platform subdirectory of legacy/ whose golden
@@ -97,7 +99,7 @@ func canonicalFixtureJSON(t *testing.T, v any) string {
 // runFixtureStep executes one step against a fresh-per-case service and returns
 // the normalized actual response as canonical JSON, plus the expected canonical
 // JSON. A nil response (notifications, dropped payloads) canonicalizes to null.
-func runFixtureStep(t *testing.T, svc *service, step fixtureStep) (actual string, expected string) {
+func runFixtureStep(t *testing.T, srv *gomcp.Server, step fixtureStep) (actual string, expected string) {
 	t.Helper()
 
 	var response map[string]any
@@ -106,7 +108,7 @@ func runFixtureStep(t *testing.T, svc *service, step fixtureStep) (actual string
 		// handling is caught here rather than being masked by a reimplementation.
 		response = runRawLine(t, *step.RequestRaw)
 	} else {
-		response = handleMCPRequest(step.Request, svc)
+		response = srv.Handle(step.Request)
 	}
 
 	// Round-trip the response through JSON so Go structs (tool definitions,
@@ -212,9 +214,9 @@ func TestMCPProtocolFixturesLegacy(t *testing.T) {
 	for _, path := range files {
 		c := loadFixtureCase(t, path)
 		t.Run(c.Name, func(t *testing.T) {
-			svc := newService()
+			srv := mcpServer()
 			for i, step := range c.Steps {
-				actual, expected := runFixtureStep(t, svc, step)
+				actual, expected := runFixtureStep(t, srv, step)
 				if actual != expected {
 					t.Errorf("step %d mismatch\n  expected: %s\n  actual:   %s", i, expected, actual)
 				}
@@ -248,8 +250,17 @@ func loadExpectedFailures(t *testing.T) expectedFailures {
 // is retired. A modern case absent from the manifest is enforced like a legacy
 // case. This keeps the suite green at M0 while flipping to enforcing as M1 lands.
 func TestMCPProtocolFixturesModern(t *testing.T) {
-	dir := filepath.Join(fixturesRoot, "modern")
-	files := fixtureFiles(t, dir)
+	// Shared modern cases live in modern/; cases whose expects carry
+	// platform-specific text (server/discover instructions, tools/list
+	// descriptions) live in modern/<fixturePlatformDir>/.
+	dirs := []string{
+		filepath.Join(fixturesRoot, "modern"),
+		filepath.Join(fixturesRoot, "modern", fixturePlatformDir),
+	}
+	var files []string
+	for _, d := range dirs {
+		files = append(files, fixtureFiles(t, d)...)
+	}
 	if len(files) == 0 {
 		t.Fatal("no modern fixtures found")
 	}
@@ -259,10 +270,10 @@ func TestMCPProtocolFixturesModern(t *testing.T) {
 		c := loadFixtureCase(t, path)
 		discovered[c.Name] = true
 		t.Run(c.Name, func(t *testing.T) {
-			svc := newService()
+			srv := mcpServer()
 			allMatch := true
 			for _, step := range c.Steps {
-				actual, expected := runFixtureStep(t, svc, step)
+				actual, expected := runFixtureStep(t, srv, step)
 				if actual != expected {
 					allMatch = false
 				}

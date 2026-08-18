@@ -234,7 +234,7 @@ func TestMCPInitializeResponseContainsToolsCapability(t *testing.T) {
 		"method":  "initialize",
 		"params":  map[string]any{},
 	}
-	response := handleMCPRequest(request, newService())
+	response := mcpServer().Handle(request)
 	result, ok := response["result"].(map[string]any)
 	if !ok {
 		t.Fatalf("missing result: %#v", response)

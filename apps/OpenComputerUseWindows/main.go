@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/iFurySt/open-codex-computer-use/packages/gomcp"
 )
 
 var version = "0.3.1"
@@ -1160,74 +1162,22 @@ func readJSONSource(inline, file string) (string, error) {
 	return string(data), nil
 }
 
-func runMCP(stdin io.Reader, stdout io.Writer) error {
+// mcpServer builds a stdio MCP server bound to a fresh service and this app's
+// protocol seams (instructions, version, tool catalog, tool dispatch). The
+// shared gomcp package owns era classification, the modern envelope, response
+// decoration, server/discover, and the stdio loop.
+func mcpServer() *gomcp.Server {
 	svc := newService()
-	decoder := json.NewDecoder(stdin)
-	encoder := json.NewEncoder(stdout)
-	for {
-		var request map[string]any
-		if err := decoder.Decode(&request); err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			_ = encoder.Encode(jsonRPCError(nil, -32700, "Invalid JSON-RPC payload"))
-			continue
-		}
-		response := handleMCPRequest(request, svc)
-		if response != nil {
-			if err := encoder.Encode(response); err != nil {
-				return err
-			}
-		}
-	}
+	return gomcp.NewServer(gomcp.Hooks{
+		Instructions:    serverInstructions,
+		Version:         version,
+		ToolDefinitions: func() any { return toolDefinitions() },
+		CallTool:        func(name string, args map[string]any) any { return svc.callTool(name, args) },
+	})
 }
 
-func handleMCPRequest(request map[string]any, svc *service) map[string]any {
-	id := request["id"]
-	method, _ := request["method"].(string)
-	params, _ := request["params"].(map[string]any)
-	switch method {
-	case "initialize":
-		return jsonRPCResult(id, map[string]any{
-			"protocolVersion": "2025-03-26",
-			"serverInfo": map[string]any{
-				"name":    "open-computer-use",
-				"version": version,
-			},
-			"capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
-			"instructions": serverInstructions,
-		})
-	case "notifications/initialized", "notifications/turn-ended":
-		return nil
-	case "ping":
-		return jsonRPCResult(id, map[string]any{})
-	case "tools/list":
-		return jsonRPCResult(id, map[string]any{"tools": toolDefinitions()})
-	case "tools/call":
-		name, _ := params["name"].(string)
-		arguments, _ := params["arguments"].(map[string]any)
-		if arguments == nil {
-			arguments = map[string]any{}
-		}
-		return jsonRPCResult(id, svc.callTool(name, arguments))
-	default:
-		if method == "" {
-			return nil
-		}
-		return jsonRPCError(id, -32601, "Method not found: "+method)
-	}
-}
-
-func jsonRPCResult(id any, result any) map[string]any {
-	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
-}
-
-func jsonRPCError(id any, code int, message string) map[string]any {
-	return map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"error":   map[string]any{"code": code, "message": message},
-	}
+func runMCP(stdin io.Reader, stdout io.Writer) error {
+	return mcpServer().Run(stdin, stdout)
 }
 
 func helpText(command string) string {

@@ -24,6 +24,11 @@ run_swift_suite() {
 }
 
 run_go_suites() {
+  echo "go: shared protocol unit tests (packages/go-mcp)"
+  (
+    cd "${repo_root}/packages/go-mcp"
+    go test -count=1 ./...
+  )
   for app in OpenComputerUseWindows OpenComputerUseLinux; do
     echo "go: MCP protocol fixtures (${app})"
     (

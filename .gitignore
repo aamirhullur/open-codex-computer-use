@@ -8,3 +8,8 @@ artifacts/codex-dumps/
 research/
 __pycache__/
 *.pyc
+
+# Go build artifacts (module has no cmd/ dir; `go build ./...` drops binaries in the app dirs)
+opencomputeruselinux
+opencomputerusewindows
+*.exe

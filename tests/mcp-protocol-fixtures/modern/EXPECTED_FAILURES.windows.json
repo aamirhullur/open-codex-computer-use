@@ -1,15 +1,4 @@
 {
-  "description": "Modern 2026-07-28 fixtures that the current handlers do not yet implement. Each entry maps a modern case name (the fixture's name field) to the reason it currently mismatches its target shape. A runner treats a listed case as passing while it mismatches, and fails if the case unexpectedly matches (a signal the feature landed and the entry should be removed). Entries are retired per platform as M1 and M2 implement the modern era on it.",
-  "cases": {
-    "modern-server-discover": "server/discover is not implemented until M1; handlers return -32601.",
-    "modern-tools-list-meta": "Modern response decoration (resultType, cache hints, result _meta) is not implemented until M1.",
-    "modern-tools-call-meta": "Modern response decoration on tool results is not implemented until M1.",
-    "modern-missing-version": "Per-request _meta validation (-32602 on missing protocolVersion) is not implemented until M1.",
-    "modern-missing-capabilities": "Per-request _meta validation (-32602 on missing clientCapabilities) is not implemented until M1.",
-    "modern-unsupported-version": "Per-request _meta version negotiation (-32022 with supported/requested) is not implemented until M1.",
-    "modern-rejects-initialize": "Era classification rejecting initialize in modern mode is not implemented until M1.",
-    "modern-rejects-ping": "Era classification removing modern ping is not implemented until M1.",
-    "modern-probe-then-modern-calls": "The modern probe-then-call sequence depends on server/discover and modern dispatch, not implemented until M1.",
-    "modern-deterministic-tool-order": "The ordered modern tool catalog with cache hints is not frozen until M2."
-  }
+  "description": "Modern 2026-07-28 fixtures the windows handler does not yet implement. Each entry maps a modern case name to the reason it currently mismatches. Empty at M1: the dual-era adapter implements every modern case on this platform.",
+  "cases": {}
 }

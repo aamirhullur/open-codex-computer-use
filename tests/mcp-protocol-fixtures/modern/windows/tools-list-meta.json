@@ -1,0 +1,350 @@
+{
+  "description": "Direct modern tools/list with per-request _meta returns resultType complete, the tool catalog, cache hints, and result _meta serverInfo. Frozen per platform because tool descriptions are platform-specific.",
+  "name": "modern-tools-list-meta",
+  "steps": [
+    {
+      "expect": {
+        "id": 101,
+        "jsonrpc": "2.0",
+        "result": {
+          "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+              "name": "open-computer-use",
+              "version": "<VERSION>"
+            }
+          },
+          "cacheScope": "public",
+          "resultType": "complete",
+          "tools": [
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "openWorldHint": false
+              },
+              "description": "Click an element by index or pixel coordinates from screenshot. This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                  "app": {
+                    "description": "App name or bundle identifier",
+                    "type": "string"
+                  },
+                  "click_count": {
+                    "description": "Number of clicks. Defaults to 1",
+                    "type": "integer"
+                  },
+                  "click_method": {
+                    "description": "Click implementation: auto (default), accessibility, app_post, sky_click, or global. Accessibility requires element_index. Windows supports app_post through HWND messages and does not currently support sky_click or global.",
+                    "enum": [
+                      "auto",
+                      "accessibility",
+                      "app_post",
+                      "sky_click",
+                      "global"
+                    ],
+                    "type": "string"
+                  },
+                  "element_index": {
+                    "description": "Element index to click",
+                    "type": "string"
+                  },
+                  "mouse_button": {
+                    "description": "Mouse button to click. Defaults to left.",
+                    "enum": [
+                      "left",
+                      "right",
+                      "middle"
+                    ],
+                    "type": "string"
+                  },
+                  "x": {
+                    "description": "X coordinate in screenshot pixel coordinates",
+                    "type": "number"
+                  },
+                  "y": {
+                    "description": "Y coordinate in screenshot pixel coordinates",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "app"
+                ],
+                "type": "object"
+              },
+              "name": "click"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "openWorldHint": false
+              },
+              "description": "Drag from one point to another using pixel coordinates. This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                  "app": {
+                    "description": "App name or bundle identifier",
+                    "type": "string"
+                  },
+                  "from_x": {
+                    "description": "Start X coordinate",
+                    "type": "number"
+                  },
+                  "from_y": {
+                    "description": "Start Y coordinate",
+                    "type": "number"
+                  },
+                  "to_x": {
+                    "description": "End X coordinate",
+                    "type": "number"
+                  },
+                  "to_y": {
+                    "description": "End Y coordinate",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "app",
+                  "from_x",
+                  "from_y",
+                  "to_x",
+                  "to_y"
+                ],
+                "type": "object"
+              },
+              "name": "drag"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Get the state of an already running app's key window and return a screenshot and accessibility tree. This must be called once per assistant turn before interacting with the app. This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                  "app": {
+                    "description": "App name or bundle identifier",
+                    "type": "string"
+                  },
+                  "max_tree_depth": {
+                    "description": "Maximum accessibility tree depth to render. Defaults to 64.",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "max_tree_nodes": {
+                    "description": "Maximum accessibility tree nodes to render. Defaults to 1200.",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "text_limit": {
+                    "anyOf": [
+                      {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      {
+                        "enum": [
+                          "max"
+                        ],
+                        "type": "string"
+                      }
+                    ],
+                    "description": "Maximum text characters to return. Use \"max\" for full text. Defaults to 500."
+                  }
+                },
+                "required": [
+                  "app"
+                ],
+                "type": "object"
+              },
+              "name": "get_app_state"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "List the apps on this computer. Returns the set of apps that are currently running, as well as any that have been used in the last 14 days, including details on usage frequency. This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {},
+                "type": "object"
+              },
+              "name": "list_apps"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "openWorldHint": false
+              },
+              "description": "Invoke a secondary accessibility action exposed by an element. This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "description": "Secondary accessibility action name",
+                    "type": "string"
+                  },
+                  "app": {
+                    "description": "App name or bundle identifier",
+                    "type": "string"
+                  },
+                  "element_index": {
+                    "description": "Element identifier",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "app",
+                  "element_index",
+                  "action"
+                ],
+                "type": "object"
+              },
+              "name": "perform_secondary_action"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "openWorldHint": false
+              },
+              "description": "Press a key or key-combination on the keyboard, including modifier and navigation keys.\n  - This supports xdotool's `key` syntax.\n  - Examples: \"a\", \"Return\", \"Tab\", \"super+c\", \"Up\", \"KP_0\" (for the numpad 0). This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                  "app": {
+                    "description": "App name or bundle identifier",
+                    "type": "string"
+                  },
+                  "key": {
+                    "description": "Key or key-combination to press",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "app",
+                  "key"
+                ],
+                "type": "object"
+              },
+              "name": "press_key"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "openWorldHint": false
+              },
+              "description": "Scroll an element in a direction by a number of pages. This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                  "app": {
+                    "description": "App name or bundle identifier",
+                    "type": "string"
+                  },
+                  "direction": {
+                    "description": "Scroll direction: up, down, left, or right",
+                    "type": "string"
+                  },
+                  "element_index": {
+                    "description": "Element identifier",
+                    "type": "string"
+                  },
+                  "pages": {
+                    "description": "Number of pages to scroll. Fractional values are supported. Defaults to 1",
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "app",
+                  "element_index",
+                  "direction"
+                ],
+                "type": "object"
+              },
+              "name": "scroll"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "openWorldHint": false
+              },
+              "description": "Set the value of a settable accessibility element. This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                  "app": {
+                    "description": "App name or bundle identifier",
+                    "type": "string"
+                  },
+                  "element_index": {
+                    "description": "Element identifier",
+                    "type": "string"
+                  },
+                  "value": {
+                    "description": "Value to assign",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "app",
+                  "element_index",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "name": "set_value"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "openWorldHint": false
+              },
+              "description": "Type literal text using keyboard input. This tool is part of plugin `Computer Use`.",
+              "inputSchema": {
+                "additionalProperties": false,
+                "properties": {
+                  "app": {
+                    "description": "App name or bundle identifier",
+                    "type": "string"
+                  },
+                  "text": {
+                    "description": "Literal text to type",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "app",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "name": "type_text"
+            }
+          ],
+          "ttlMs": 300000
+        }
+      },
+      "request": {
+        "id": 101,
+        "jsonrpc": "2.0",
+        "method": "tools/list",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "probe",
+              "version": "0"
+            },
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      }
+    }
+  ]
+}

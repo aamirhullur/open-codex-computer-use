@@ -1,0 +1,48 @@
+{
+  "description": "server/discover succeeds without initialize and returns supportedVersions, cache hints, and result _meta serverInfo. Frozen per platform because the instructions text is platform-specific.",
+  "name": "modern-server-discover",
+  "steps": [
+    {
+      "expect": {
+        "id": 100,
+        "jsonrpc": "2.0",
+        "result": {
+          "_meta": {
+            "io.modelcontextprotocol/serverInfo": {
+              "name": "open-computer-use",
+              "version": "<VERSION>"
+            }
+          },
+          "cacheScope": "public",
+          "capabilities": {
+            "tools": {
+              "listChanged": false
+            }
+          },
+          "instructions": "Computer Use tools let you interact with Windows apps by performing UI actions.\n\nBegin by calling `get_app_state` every turn you want to use Computer Use to get the latest state before acting. The available tools are list_apps, get_app_state, click, perform_secondary_action, scroll, drag, type_text, press_key, and set_value.\n\nPrefer element-targeted interactions over coordinate clicks when an index for the targeted element is available. Windows actions use UI Automation patterns first and fall back to window messages when an app does not expose the needed pattern. The Windows runtime does not auto-launch apps, perform SetFocus, or use UIA text fallback by default, so background-capable actions do not intentionally steal the user's foreground focus.",
+          "resultType": "complete",
+          "supportedVersions": [
+            "2026-07-28",
+            "2025-03-26"
+          ],
+          "ttlMs": 300000
+        }
+      },
+      "request": {
+        "id": 100,
+        "jsonrpc": "2.0",
+        "method": "server/discover",
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "probe",
+              "version": "0"
+            },
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+          }
+        }
+      }
+    }
+  ]
+}

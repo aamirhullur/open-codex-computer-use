@@ -24,18 +24,24 @@ tests/mcp-protocol-fixtures/
   legacy/macos/          legacy cases specific to the Swift handler
   legacy/linux/          legacy cases specific to the Linux handler
   legacy/windows/        legacy cases specific to the Windows handler
-  modern/                modern 2026-07-28 target cases (currently expected-fail)
+  modern/                shared modern 2026-07-28 cases (platform-invariant)
+  modern/macos/          modern cases with macOS-specific instructions/tool text
+  modern/linux/          modern cases with Linux-specific instructions/tool text
+  modern/windows/        modern cases with Windows-specific instructions/tool text
   modern/EXPECTED_FAILURES.<platform>.json
 ```
 
 The interface contract asks for `legacy/` and `modern/` subdirs. The per-platform
-`legacy/<platform>/` subdirs are a deliberate extension: the legacy `initialize`
-response embeds platform-specific `instructions`, and legacy `tools/list` embeds
-platform-specific tool `description` text, so those two cases cannot be a single
-shared golden file. Every runner loads `legacy/` plus its own
-`legacy/<platform>/` directory. Cases whose normalized bytes are identical on all
-three platforms (ping, notifications, errors, deterministic tool errors) live in
-the flat `legacy/` directory and prove cross-platform protocol identity.
+`legacy/<platform>/` and `modern/<platform>/` subdirs are a deliberate extension:
+the legacy `initialize` response and modern `server/discover` embed
+platform-specific `instructions`, and legacy/modern `tools/list` embed
+platform-specific tool `description` text, so those cases cannot be a single
+shared golden file. Every runner loads `legacy/` plus its own `legacy/<platform>/`
+directory, and `modern/` plus its own `modern/<platform>/` directory. Cases whose
+normalized bytes are identical on all three platforms (ping, notifications,
+errors, deterministic tool errors on the legacy side; the envelope-validation and
+method-rejection cases on the modern side) live in the flat directories and prove
+cross-platform protocol identity.
 
 ## Fixture format
 

@@ -159,8 +159,13 @@ final class MCPProtocolFixtureTests: XCTestCase {
     // entry is retired. A modern case absent from the manifest is enforced like
     // a legacy case. The suite is green at M0 and flips to enforcing as M1 lands.
     func testModernProtocolFixtures() {
+        // Platform-invariant modern cases live in modern/; cases whose expects
+        // embed platform-specific text (server/discover instructions, tools/list
+        // descriptions) are frozen per platform under modern/<platform>/. Both
+        // directories load loud-fail style, like legacy.
         let modernRoot = Self.fixturesRoot.appendingPathComponent("modern")
-        let files = fixtureFiles(in: modernRoot)
+        var files = fixtureFiles(in: modernRoot)
+        files += fixtureFiles(in: modernRoot.appendingPathComponent(Self.platformDir))
         XCTAssertFalse(files.isEmpty, "no modern fixtures found")
         let manifest = expectedFailures()
         var discovered = Set<String>()
