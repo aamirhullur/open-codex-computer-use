@@ -173,6 +173,13 @@ type psRequest struct {
 	TextLimit    any            `json:"text_limit,omitempty"`
 	MaxTreeNodes int            `json:"max_tree_nodes,omitempty"`
 	MaxTreeDepth int            `json:"max_tree_depth,omitempty"`
+	// ExpectedRole and ExpectedName are the modern-era element revalidation
+	// expectations. The runtime resolves the stored runtimeId against a fresh tree
+	// and, when these are present, verifies the resolved node still exposes the
+	// same role (and stable name) before acting. Legacy requests never set them,
+	// so the runtime path stays byte-identical for the legacy era.
+	ExpectedRole string `json:"expected_role,omitempty"`
+	ExpectedName string `json:"expected_name,omitempty"`
 }
 
 type textLimit struct {
@@ -188,10 +195,15 @@ func (limit textLimit) runtimeValue() any {
 }
 
 type psResponse struct {
-	OK       bool         `json:"ok"`
-	Text     string       `json:"text,omitempty"`
-	Error    string       `json:"error,omitempty"`
-	Snapshot *appSnapshot `json:"snapshot,omitempty"`
+	OK   bool   `json:"ok"`
+	Text string `json:"text,omitempty"`
+	// ErrorKind is a structured failure marker. The runtime sets it to
+	// gomcp.ErrorKindElementMismatch when the resolved node no longer matches the
+	// stored element's role or stable name; the modern action transaction maps
+	// that to snapshot_target_changed with no native action performed.
+	ErrorKind string       `json:"errorKind,omitempty"`
+	Error     string       `json:"error,omitempty"`
+	Snapshot  *appSnapshot `json:"snapshot,omitempty"`
 }
 
 type service struct {
@@ -229,6 +241,13 @@ func newService() *service {
 }
 
 func (s *service) callTool(name string, args map[string]any, modern bool) toolCallResult {
+	// Modern-era action tools run the M4 transaction: they consume an explicit
+	// snapshot_ref and dispatch from the stored snapshot. The legacy switch below
+	// keeps the implicit currentSnapshot behavior for the legacy era and the CLI
+	// batch path (both pass modern=false).
+	if modern && gomcp.IsModernActionTool(name) {
+		return s.callModernAction(name, args)
+	}
 	switch name {
 	case "list_apps":
 		return s.listApps()
@@ -344,7 +363,19 @@ func (s *service) getAppState(app string, textLimit *textLimit, maxTreeNodes, ma
 // snapshot payload (screenshot bytes and element records) until it expires or is
 // superseded; the metadata kept here carries no accessibility text.
 func (s *service) mintSnapshotState(snapshot *appSnapshot) (gomcp.StructuredState, error) {
-	meta := gomcp.SnapshotMeta{
+	target := gomcp.TargetKey{App: snapshotTargetIdentity(snapshot)}
+	record, err := s.store.Mint(target, snapshot, snapshotMeta(snapshot))
+	if err != nil {
+		return gomcp.StructuredState{}, err
+	}
+	return snapshotState(record.Handle, record.CreatedAt, record.ExpiresAt, record.Generation, record.Meta), nil
+}
+
+// snapshotMeta builds the normalized store metadata for a captured snapshot. The
+// screenshot bytes and element records stay in the payload; the metadata carries
+// no accessibility text.
+func snapshotMeta(snapshot *appSnapshot) gomcp.SnapshotMeta {
+	return gomcp.SnapshotMeta{
 		AppName:          snapshot.App.Name,
 		BundleIdentifier: snapshot.App.BundleIdentifier,
 		PID:              snapshot.App.PID,
@@ -352,12 +383,326 @@ func (s *service) mintSnapshotState(snapshot *appSnapshot) (gomcp.StructuredStat
 		ScreenshotPixels: pngPixelSize(snapshot.ScreenshotPNGBase64),
 		Mode:             "real",
 	}
-	target := gomcp.TargetKey{App: snapshotTargetIdentity(snapshot)}
-	record, err := s.store.Mint(target, snapshot, meta)
-	if err != nil {
-		return gomcp.StructuredState{}, err
+}
+
+// callModernAction runs the M4 transaction for one of the seven modern action
+// tools (design "Action transaction" steps 1-7). It parses snapshot_ref before
+// any side effect (including app resolution), moves the handle to in_flight under
+// the store lock, verifies the requested app resolves to the stored target,
+// builds the runtime request from the STORED snapshot (never the legacy snapshots
+// map), dispatches exactly one runtime invocation, and mints a successor handle.
+// Every failure class transitions the handle per the pinned cross-platform
+// contract and its retry semantics.
+func (s *service) callModernAction(name string, args map[string]any) toolCallResult {
+	// Step 1: parse and validate snapshot_ref before touching args or the app.
+	ref, present := snapshotRefArg(args)
+	if !present {
+		return snapshotErrorResult(gomcp.ErrSnapshotRefMissing, gomcp.MsgSnapshotRefMissing)
 	}
-	return snapshotState(record.Handle, record.CreatedAt, record.ExpiresAt, record.Generation, record.Meta), nil
+	if !gomcp.ValidHandleFormat(ref) {
+		return snapshotErrorResult(gomcp.ErrSnapshotRefMalformed, gomcp.MsgSnapshotRefMalformed)
+	}
+
+	// Steps 2 and 4: resolve and CAS live -> in_flight under the store's
+	// per-target lock. Unknown/expired/stale/in_use return here with no dispatch.
+	rec, err := s.store.BeginAction(ref)
+	if err != nil {
+		return resolveErrorResult(err)
+	}
+
+	// Step 3: verify the requested app resolves to the stored target identity. A
+	// name alias is fine; an identity mismatch changes the target.
+	app := requiredString(args, "app")
+	if app == "" {
+		_ = s.store.AbortRestore(ref, gomcp.AbortValidation)
+		return textResult("Missing required argument: app", true)
+	}
+	if !appMatchesRecord(app, rec.Meta) {
+		_ = s.store.AbortRestore(ref, gomcp.AbortMismatched)
+		return snapshotErrorResult(gomcp.ErrSnapshotTargetChanged, gomcp.MsgSnapshotTargetChangedApp)
+	}
+
+	// Step 5 setup: build the runtime request from the STORED snapshot and run the
+	// pre-dispatch validations (coordinates inside the captured screenshot,
+	// element index resolvable). A validation failure restores the handle to live.
+	request, verr := buildModernRequest(name, app, args, rec.Payload)
+	if verr != nil {
+		_ = s.store.AbortRestore(ref, gomcp.AbortValidation)
+		return textResult(verr.Error(), true)
+	}
+
+	// Step 6: dispatch EXACTLY ONE runtime invocation from the stored snapshot.
+	response, rerr := s.runner(request)
+	if rerr != nil {
+		// The dispatch began but its outcome is unknown.
+		_ = s.store.AbortSupersede(ref, gomcp.AbortUncertain)
+		return snapshotErrorResult(gomcp.ErrSnapshotActionOutcomeUncertain, gomcp.MsgSnapshotActionOutcomeUncertain)
+	}
+	if !response.OK {
+		switch response.ErrorKind {
+		case gomcp.ErrorKindElementMismatch:
+			// The runtime revalidated the resolved node against the stored record
+			// and refused before performing any native action.
+			_ = s.store.AbortRestore(ref, gomcp.AbortMismatched)
+			return snapshotErrorResult(gomcp.ErrSnapshotTargetChanged, gomcp.MsgSnapshotTargetChangedElement)
+		case gomcp.ErrorKindRejectedBeforeInput:
+			// The runtime rejected the request from a site that provably precedes
+			// any native input; the handle stays live for a same-handle retry.
+			_ = s.store.AbortRestore(ref, gomcp.AbortValidation)
+			return textResult(response.Error, true)
+		default:
+			// The runtime attempted the action and reported failure; treat the
+			// outcome as uncertain and require a recapture.
+			_ = s.store.AbortSupersede(ref, gomcp.AbortUncertain)
+			return snapshotErrorResult(gomcp.ErrSnapshotActionOutcomeUncertain, gomcp.MsgSnapshotActionOutcomeUncertain)
+		}
+	}
+	if response.Snapshot == nil {
+		// Adjudicated refresh-failure: the action dispatched but the post-action
+		// state could not be recaptured. Supersede and instruct the caller to
+		// recapture; the action likely succeeded.
+		_ = s.store.AbortSupersede(ref, gomcp.AbortRefreshFailed)
+		return snapshotErrorResult(gomcp.ErrSnapshotActionOutcomeUncertain, gomcp.MsgSnapshotActionRefreshFailed)
+	}
+
+	// Step 7: mint the successor (generation n+1), supersede the old handle, and
+	// return the successor snapshot_ref in text and structuredContent.
+	succ, ferr := s.store.FinishSuccess(ref, response.Snapshot, snapshotMeta(response.Snapshot))
+	if ferr != nil {
+		_ = s.store.AbortSupersede(ref, gomcp.AbortRefreshFailed)
+		return snapshotErrorResult(gomcp.ErrSnapshotActionOutcomeUncertain, gomcp.MsgSnapshotActionRefreshFailed)
+	}
+	state := snapshotState(succ.Handle, succ.CreatedAt, succ.ExpiresAt, succ.Generation, succ.Meta)
+	return response.Snapshot.modernStateResult(state)
+}
+
+// snapshotRefArg extracts a present, non-empty snapshot_ref string argument.
+func snapshotRefArg(args map[string]any) (string, bool) {
+	value, ok := args[gomcp.SnapshotRefKey]
+	if !ok {
+		return "", false
+	}
+	str, _ := value.(string)
+	str = strings.TrimSpace(str)
+	if str == "" {
+		return "", false
+	}
+	return str, true
+}
+
+// appMatchesRecord reports whether the requested app string refers to the same
+// app the handle was captured against. The stored identity is the app name, its
+// bundle/executable identity, and its PID (the same alias set the legacy cache
+// keys on); a case-insensitive match against any of them is an accepted alias.
+//
+// Accepted platform limitation: this compares the request string against stored
+// aliases, so it cannot detect a same-name relaunch (a new PID reusing the old
+// name/bundle) before dispatch, since Go resolves identity only at the runtime
+// boundary. For element actions the runtime-side runtimeId + role/name
+// expectation check (see withExpectations / Test-ExpectationMismatch) is the
+// mitigating guard: a relaunched process yields a different tree and fails the
+// element revalidation as snapshot_target_changed with no native action.
+func appMatchesRecord(app string, meta gomcp.SnapshotMeta) bool {
+	want := strings.ToLower(strings.TrimSpace(app))
+	if want == "" {
+		return false
+	}
+	for _, candidate := range []string{meta.AppName, meta.BundleIdentifier, strconv.Itoa(meta.PID)} {
+		if strings.ToLower(strings.TrimSpace(candidate)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotErrorResult builds a modern isError tool result carrying the snapshot
+// tool-error envelope in structuredContent.error alongside the visible message.
+func snapshotErrorResult(code, message string) toolCallResult {
+	return toolCallResult{
+		Content: []contentItem{{Type: "text", Text: message}},
+		IsError: true,
+		StructuredContent: map[string]any{
+			"error": map[string]any{
+				"code":    code,
+				"message": message,
+				"retry":   gomcp.CanonicalRetry(code),
+			},
+		},
+	}
+}
+
+// resolveErrorResult maps a store resolution/transaction error to a modern tool
+// error result with the pinned code, message, and retry class.
+func resolveErrorResult(err error) toolCallResult {
+	if code, message, ok := gomcp.ResolveErrorCodeMessage(err); ok {
+		return snapshotErrorResult(code, message)
+	}
+	return textResult(err.Error(), true)
+}
+
+// buildModernRequest assembles the runtime request for a modern action from the
+// STORED snapshot and the call arguments, running the same input validation the
+// legacy methods run plus the modern coordinate-in-screenshot checks. It never
+// reads the legacy snapshots map.
+func buildModernRequest(name, app string, args map[string]any, stored *appSnapshot) (psRequest, error) {
+	switch name {
+	case "click":
+		return buildModernClick(app, args, stored)
+	case "perform_secondary_action":
+		elementIndex := requiredElementIndex(args)
+		action := requiredString(args, "action")
+		if elementIndex == "" {
+			return psRequest{}, errors.New("Missing required argument: element_index")
+		}
+		if action == "" {
+			return psRequest{}, errors.New("Missing required argument: action")
+		}
+		record, err := lookupElement(stored, elementIndex)
+		if err != nil {
+			return psRequest{}, err
+		}
+		req := psRequest{Tool: "perform_secondary_action", App: app, Action: action}
+		withExpectations(&req, record)
+		return req, nil
+	case "scroll":
+		elementIndex := requiredElementIndex(args)
+		if elementIndex == "" {
+			return psRequest{}, errors.New("Missing required argument: element_index")
+		}
+		normalized := strings.ToLower(requiredString(args, "direction"))
+		if normalized != "up" && normalized != "down" && normalized != "left" && normalized != "right" {
+			return psRequest{}, errors.New("Invalid scroll direction: " + requiredString(args, "direction"))
+		}
+		pages := floatValue(optionalFloat(args, "pages"), 1)
+		if pages <= 0 {
+			return psRequest{}, errors.New("pages must be > 0")
+		}
+		record, err := lookupElement(stored, elementIndex)
+		if err != nil {
+			return psRequest{}, err
+		}
+		req := psRequest{Tool: "scroll", App: app, Direction: normalized, Pages: pages}
+		withExpectations(&req, record)
+		return req, nil
+	case "drag":
+		fromX := requiredFloat(args, "from_x")
+		fromY := requiredFloat(args, "from_y")
+		toX := requiredFloat(args, "to_x")
+		toY := requiredFloat(args, "to_y")
+		for key, value := range map[string]*float64{"from_x": fromX, "from_y": fromY, "to_x": toX, "to_y": toY} {
+			if value == nil {
+				return psRequest{}, errors.New("Missing required argument: " + key)
+			}
+		}
+		if err := validateStoredPoint(stored, fromX, fromY); err != nil {
+			return psRequest{}, err
+		}
+		if err := validateStoredPoint(stored, toX, toY); err != nil {
+			return psRequest{}, err
+		}
+		return psRequest{Tool: "drag", App: app, FromX: fromX, FromY: fromY, ToX: toX, ToY: toY, WindowBounds: stored.WindowBounds}, nil
+	case "type_text":
+		text := requiredString(args, "text")
+		if text == "" {
+			return psRequest{}, errors.New("Missing required argument: text")
+		}
+		return psRequest{Tool: "type_text", App: app, Text: text}, nil
+	case "press_key":
+		key := requiredString(args, "key")
+		if key == "" {
+			return psRequest{}, errors.New("Missing required argument: key")
+		}
+		return psRequest{Tool: "press_key", App: app, Key: key}, nil
+	case "set_value":
+		elementIndex := requiredElementIndex(args)
+		if elementIndex == "" {
+			return psRequest{}, errors.New("Missing required argument: element_index")
+		}
+		record, err := lookupElement(stored, elementIndex)
+		if err != nil {
+			return psRequest{}, err
+		}
+		req := psRequest{Tool: "set_value", App: app, Value: requiredString(args, "value")}
+		withExpectations(&req, record)
+		return req, nil
+	default:
+		return psRequest{}, fmt.Errorf("unsupportedTool(%q)", name)
+	}
+}
+
+// buildModernClick builds a modern click request, applying the same click_method
+// gating the legacy Windows click applies and validating coordinate clicks
+// against the stored screenshot dimensions.
+func buildModernClick(app string, args map[string]any, stored *appSnapshot) (psRequest, error) {
+	clickMethod, err := parseClickMethod(optionalString(args, "click_method"))
+	if err != nil {
+		return psRequest{}, err
+	}
+	elementIndex := optionalElementIndex(args)
+	x := optionalFloat(args, "x")
+	y := optionalFloat(args, "y")
+	if elementIndex == "" && (x == nil || y == nil) {
+		return psRequest{}, errors.New("click requires either element_index or x/y")
+	}
+	if clickMethod == "accessibility" && elementIndex == "" {
+		return psRequest{}, errors.New("click_method 'accessibility' requires element_index")
+	}
+	if clickMethod == "global" {
+		return psRequest{}, errors.New("click_method 'global' is not supported on Windows")
+	}
+	if clickMethod == "sky_click" {
+		return psRequest{}, errors.New("click_method 'sky_click' is not supported on Windows")
+	}
+	req := psRequest{
+		Tool:         "click",
+		App:          app,
+		X:            x,
+		Y:            y,
+		ClickCount:   intValue(optionalFloat(args, "click_count"), 1),
+		MouseButton:  defaultString(optionalString(args, "mouse_button"), "left"),
+		ClickMethod:  clickMethod,
+		WindowBounds: stored.WindowBounds,
+	}
+	if elementIndex != "" {
+		record, err := lookupElement(stored, elementIndex)
+		if err != nil {
+			return psRequest{}, err
+		}
+		withExpectations(&req, record)
+	} else if err := validateStoredPoint(stored, x, y); err != nil {
+		return psRequest{}, err
+	}
+	return req, nil
+}
+
+// withExpectations binds the request to a stored element and carries the modern
+// element-revalidation expectations. It sends expected_role whenever the stored
+// element has one and expected_name only when the stored name is present and not
+// truncated (a truncated name is not a stable equality target).
+func withExpectations(req *psRequest, record *elementRecord) {
+	req.Element = record
+	if record.ControlType != "" {
+		req.ExpectedRole = record.ControlType
+	}
+	if record.Name != "" && !strings.HasSuffix(record.Name, "...") {
+		req.ExpectedName = record.Name
+	}
+}
+
+// validateStoredPoint rejects a coordinate action whose point falls outside the
+// captured screenshot's pixel dimensions. Bounds are half-open (valid iff
+// 0 <= x < width and 0 <= y < height), matching the Swift check. When the stored
+// snapshot has no derivable pixel size, the point cannot be validated and is
+// allowed through.
+func validateStoredPoint(stored *appSnapshot, x, y *float64) error {
+	pixels := pngPixelSize(stored.ScreenshotPNGBase64)
+	if pixels == nil || x == nil || y == nil {
+		return nil
+	}
+	if *x < 0 || *y < 0 || *x >= float64(pixels.Width) || *y >= float64(pixels.Height) {
+		return errors.New(gomcp.MsgCoordinatesOutOfBounds)
+	}
+	return nil
 }
 
 func (s *service) click(app, elementIndex string, x, y *float64, clickCount int, mouseButton, clickMethod string) toolCallResult {
@@ -521,6 +866,12 @@ func (s *service) actionResult(app string, request psRequest) toolCallResult {
 	return snapshot.result()
 }
 
+// currentSnapshot is the LEGACY implicit-cache lookup: it returns whatever
+// snapshot was last cached under the app key. The modern era never calls it (its
+// actions dispatch from the store-resolved snapshot_ref instead). This implicit
+// path is retained only for the 2025-03-26 compatibility window and is planned
+// for removal once modern-host adoption is known (design "Phase D: later
+// cleanup").
 func (s *service) currentSnapshot(app string) *appSnapshot {
 	return s.snapshots[strings.ToLower(app)]
 }

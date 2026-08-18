@@ -45,6 +45,25 @@ const (
 	reasonEvicted    = "evicted"
 	reasonUnknown    = "unknown"
 	reasonMalformed  = "malformed"
+	// reasonInUse is not a tombstone reason: it is returned by BeginAction when a
+	// handle is already in_flight, so a second concurrent use loses the CAS. It is
+	// never stored in the tombstone table.
+	reasonInUse = "in_use"
+)
+
+// Abort reasons attribute a failed action transaction to a lifecycle counter.
+// The apps pass one of these to AbortRestore/AbortSupersede so the store records
+// the failure class at transition time. AbortMismatched restores a handle to live
+// (the requested app or the runtime-resolved element did not match the stored
+// target; zero native action occurred). AbortValidation restores a handle to live
+// for a plain pre-dispatch input-validation failure and records no failure-class
+// counter. AbortUncertain and AbortRefreshFailed supersede the handle after a
+// dispatch whose outcome is unknown or whose post-action recapture failed.
+const (
+	AbortMismatched    = "mismatched"
+	AbortValidation    = "validation"
+	AbortUncertain     = "uncertain"
+	AbortRefreshFailed = "refresh_failed"
 )
 
 // SnapshotLifecycle is the state of a stored record. M3 mints records live; the
@@ -109,14 +128,26 @@ type tombstone struct {
 }
 
 // SnapshotCounters are the redacted lifecycle counters emitted to stderr. The
-// full counter set (mismatched, concurrent, uncertain, refresh-failed) completes
-// with the M4 action transaction.
+// action-transaction counters (Mismatched, Concurrent, Uncertain, RefreshFailed)
+// are recorded at transition time by the M4 primitives.
 type SnapshotCounters struct {
 	Minted   int
 	Resolved int
 	Expired  int
 	Stale    int
 	Evicted  int
+	// Mismatched counts action transactions aborted because the requested app or
+	// the runtime-resolved element did not match the stored target.
+	Mismatched int
+	// Concurrent counts BeginAction calls that lost the live->in_flight CAS
+	// because the handle was already in_flight (a second concurrent use).
+	Concurrent int
+	// Uncertain counts action transactions superseded because a dispatch began
+	// but its outcome could not be determined.
+	Uncertain int
+	// RefreshFailed counts action transactions superseded because the action
+	// dispatched but the post-action state could not be recaptured.
+	RefreshFailed int
 }
 
 // SnapshotStore is a bounded, mutex-guarded handle store owned by the device
@@ -179,22 +210,38 @@ func (s *SnapshotStore[P]) Mint(target TargetKey, payload P, meta SnapshotMeta) 
 	now := s.now()
 
 	s.expireLocked(now)
+	rec, err := s.mintLocked(target, payload, meta, now)
+	if err != nil {
+		return SnapshotRecord[P]{}, err
+	}
+	return *rec, nil
+}
 
+// mintLocked supersedes the prior live handle for target, evicts down to the
+// capacity limit, and mints a fresh live record with the next generation. The
+// caller holds mu and has already retired expired records. It is shared by Mint
+// and by FinishSuccess (successor minting), so a successful action advances the
+// same per-target generation an explicit re-capture would.
+func (s *SnapshotStore[P]) mintLocked(target TargetKey, payload P, meta SnapshotMeta, now time.Time) (*SnapshotRecord[P], error) {
 	if h, ok := s.targetLive[target]; ok {
 		s.tombstoneLocked(h, reasonSuperseded, now)
 		s.counters.Stale++
 	}
 
 	for len(s.live) >= MaxLiveTargets {
-		s.evictOldestLocked(now)
+		if !s.evictOldestLocked(now) {
+			// Every remaining live record is in_flight and must not be evicted; mint
+			// above the soft cap rather than break an in-flight transaction.
+			break
+		}
 	}
 
 	token, err := s.tokenSource()
 	if err != nil {
-		return SnapshotRecord[P]{}, err
+		return nil, err
 	}
 	if len(token) != TokenBytes {
-		return SnapshotRecord[P]{}, fmt.Errorf("snapshot token source returned %d bytes, want %d", len(token), TokenBytes)
+		return nil, fmt.Errorf("snapshot token source returned %d bytes, want %d", len(token), TokenBytes)
 	}
 	handle := HandlePrefix + base64.RawURLEncoding.EncodeToString(token)
 
@@ -215,7 +262,147 @@ func (s *SnapshotStore[P]) Mint(target TargetKey, payload P, meta SnapshotMeta) 
 	s.targetLive[target] = handle
 	s.counters.Minted++
 	s.logf("mint", handle)
-	return *rec, nil
+	return rec, nil
+}
+
+// BeginAction opens the action transaction for a handle: it validates the format,
+// resolves the handle, and moves it from live to in_flight under the store lock.
+// It returns a *ResolveError for a malformed, unknown, expired, or stale handle,
+// and a *ResolveError with reason in_use (code snapshot_ref_in_use, retry
+// same_handle) when the handle is already in_flight. The compare-and-swap is the
+// single-writer serialization point: of two concurrent uses of one handle, only
+// the first receives the record and dispatches; the loser gets in_use.
+func (s *SnapshotStore[P]) BeginAction(handle string) (SnapshotRecord[P], error) {
+	if !ValidHandleFormat(handle) {
+		return SnapshotRecord[P]{}, &ResolveError{Reason: reasonMalformed, Suffix: RedactHandle(handle)}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+
+	s.expireLocked(now)
+
+	if rec := s.lookupLiveLocked(handle); rec != nil {
+		if rec.Lifecycle == LifecycleInFlight {
+			s.counters.Concurrent++
+			s.logf(reasonInUse, handle)
+			return SnapshotRecord[P]{}, &ResolveError{Reason: reasonInUse, Suffix: RedactHandle(handle)}
+		}
+		rec.Lifecycle = LifecycleInFlight
+		s.counters.Resolved++
+		s.logf("begin", handle)
+		return *rec, nil
+	}
+	if reason, ok := s.lookupTombstoneLocked(handle); ok {
+		return SnapshotRecord[P]{}, &ResolveError{Reason: reason, Suffix: RedactHandle(handle)}
+	}
+	return SnapshotRecord[P]{}, &ResolveError{Reason: reasonUnknown, Suffix: RedactHandle(handle)}
+}
+
+// FinishSuccess closes a successful action transaction: it supersedes the
+// in_flight handle and mints its successor for the same target with the next
+// generation, carrying the fresh post-action payload and metadata. The old handle
+// then resolves as stale. It returns a *ResolveError when the handle is not
+// in_flight (a caller invariant violation) or when minting the successor fails.
+func (s *SnapshotStore[P]) FinishSuccess(handle string, payload P, meta SnapshotMeta) (SnapshotRecord[P], error) {
+	if !ValidHandleFormat(handle) {
+		return SnapshotRecord[P]{}, &ResolveError{Reason: reasonMalformed, Suffix: RedactHandle(handle)}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+
+	rec := s.inFlightLocked(handle)
+	if rec == nil {
+		return SnapshotRecord[P]{}, s.notInFlightErrorLocked(handle)
+	}
+	target := rec.Target
+	// Retire the in_flight handle first so mintLocked does not try to supersede it
+	// a second time through targetLive.
+	s.tombstoneLocked(handle, reasonSuperseded, now)
+	s.counters.Stale++
+	succ, err := s.mintLocked(target, payload, meta, now)
+	if err != nil {
+		return SnapshotRecord[P]{}, err
+	}
+	return *succ, nil
+}
+
+// AbortRestore ends a failed pre-dispatch transaction by returning the in_flight
+// handle to live so a corrected retry with the same reference is possible. The
+// reason attributes the failure: AbortMismatched records a Mismatched counter (an
+// app-identity or runtime element mismatch, both zero-dispatch); any other reason
+// records no failure-class counter.
+func (s *SnapshotStore[P]) AbortRestore(handle, reason string) error {
+	if !ValidHandleFormat(handle) {
+		return &ResolveError{Reason: reasonMalformed, Suffix: RedactHandle(handle)}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec := s.inFlightLocked(handle)
+	if rec == nil {
+		return s.notInFlightErrorLocked(handle)
+	}
+	rec.Lifecycle = LifecycleLive
+	if reason == AbortMismatched {
+		s.counters.Mismatched++
+	}
+	s.logf("abort_restore", handle)
+	return nil
+}
+
+// AbortSupersede ends a transaction whose dispatch began but whose outcome is
+// unknown (AbortUncertain) or whose post-action recapture failed
+// (AbortRefreshFailed): it supersedes the in_flight handle so it can never be
+// reused, and records the matching counter. The old handle then resolves as
+// stale.
+func (s *SnapshotStore[P]) AbortSupersede(handle, reason string) error {
+	if !ValidHandleFormat(handle) {
+		return &ResolveError{Reason: reasonMalformed, Suffix: RedactHandle(handle)}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+
+	rec := s.inFlightLocked(handle)
+	if rec == nil {
+		return s.notInFlightErrorLocked(handle)
+	}
+	// The handle becomes stale-RESOLVABLE (a superseded tombstone) but is not
+	// counted as Stale: this is a failed action, attributed only to its dedicated
+	// Uncertain/RefreshFailed counter. A genuine supersede-by-successor
+	// (FinishSuccess) is what the Stale counter tracks.
+	s.tombstoneLocked(handle, reasonSuperseded, now)
+	switch reason {
+	case AbortUncertain:
+		s.counters.Uncertain++
+	case AbortRefreshFailed:
+		s.counters.RefreshFailed++
+	}
+	s.logf("abort_supersede", handle)
+	return nil
+}
+
+// inFlightLocked returns the in_flight record for handle, or nil when the handle
+// is absent or in any other lifecycle state.
+func (s *SnapshotStore[P]) inFlightLocked(handle string) *SnapshotRecord[P] {
+	rec := s.lookupLiveLocked(handle)
+	if rec == nil || rec.Lifecycle != LifecycleInFlight {
+		return nil
+	}
+	return rec
+}
+
+// notInFlightErrorLocked classifies a handle the transaction expected to find
+// in_flight: a tombstoned handle keeps its tombstone reason, anything else is
+// unknown. This is a caller-invariant guard; the normal transaction paths always
+// hold an in_flight handle.
+func (s *SnapshotStore[P]) notInFlightErrorLocked(handle string) error {
+	if reason, ok := s.lookupTombstoneLocked(handle); ok {
+		return &ResolveError{Reason: reason, Suffix: RedactHandle(handle)}
+	}
+	return &ResolveError{Reason: reasonUnknown, Suffix: RedactHandle(handle)}
 }
 
 // Resolve returns the live record for handle or a *ResolveError. A handle that
@@ -274,9 +461,14 @@ func (s *SnapshotStore[P]) Counters() SnapshotCounters {
 	return s.counters
 }
 
-// expireLocked retires every live record whose absolute expiry has passed.
+// expireLocked retires every live record whose absolute expiry has passed. An
+// in_flight record is left alone: an open transaction owns it, and the TTL is far
+// larger than any single dispatch, so it is retired by the transaction instead.
 func (s *SnapshotStore[P]) expireLocked(now time.Time) {
 	for h, rec := range s.live {
+		if rec.Lifecycle == LifecycleInFlight {
+			continue
+		}
 		if !now.Before(rec.ExpiresAt) {
 			s.tombstoneLocked(h, reasonExpired, now)
 			s.counters.Expired++
@@ -284,20 +476,26 @@ func (s *SnapshotStore[P]) expireLocked(now time.Time) {
 	}
 }
 
-// evictOldestLocked tombstones the least-recently-created live record.
-func (s *SnapshotStore[P]) evictOldestLocked(now time.Time) {
+// evictOldestLocked tombstones the least-recently-created evictable (non
+// in_flight) live record and reports whether it evicted one. An in_flight record
+// is never evicted because an open transaction still needs it.
+func (s *SnapshotStore[P]) evictOldestLocked(now time.Time) bool {
 	var oldest *SnapshotRecord[P]
 	for _, rec := range s.live {
+		if rec.Lifecycle == LifecycleInFlight {
+			continue
+		}
 		if oldest == nil || rec.CreatedAt.Before(oldest.CreatedAt) ||
 			(rec.CreatedAt.Equal(oldest.CreatedAt) && rec.createSeq < oldest.createSeq) {
 			oldest = rec
 		}
 	}
 	if oldest == nil {
-		return
+		return false
 	}
 	s.tombstoneLocked(oldest.Handle, reasonEvicted, now)
 	s.counters.Evicted++
+	return true
 }
 
 // tombstoneLocked releases a live record's payload, removes it from the live and
@@ -373,8 +571,8 @@ func (s *SnapshotStore[P]) logf(event, handle string) {
 		return
 	}
 	c := s.counters
-	s.logger(fmt.Sprintf("snapshot %s handle=%s minted=%d resolved=%d expired=%d stale=%d evicted=%d",
-		event, RedactHandle(handle), c.Minted, c.Resolved, c.Expired, c.Stale, c.Evicted))
+	s.logger(fmt.Sprintf("snapshot %s handle=%s minted=%d resolved=%d expired=%d stale=%d evicted=%d mismatched=%d concurrent=%d uncertain=%d refresh_failed=%d",
+		event, RedactHandle(handle), c.Minted, c.Resolved, c.Expired, c.Stale, c.Evicted, c.Mismatched, c.Concurrent, c.Uncertain, c.RefreshFailed))
 }
 
 // ResolveError is a typed handle-resolution failure. Code maps the reason to the
@@ -401,6 +599,8 @@ func (e *ResolveError) Code() string {
 		return ErrSnapshotRefStale
 	case reasonEvicted:
 		return ErrSnapshotRefExpired
+	case reasonInUse:
+		return ErrSnapshotRefInUse
 	default:
 		return ErrSnapshotRefUnknown
 	}

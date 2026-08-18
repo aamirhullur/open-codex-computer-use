@@ -427,6 +427,10 @@ public final class ComputerUseService: @unchecked Sendable {
     // single-process service mints on its own; the app agent injects one shared
     // store so handles outlive individual connections.
     private let snapshotHandleStore: SnapshotHandleStore
+    // Test seam for the modern action transaction. Production leaves this nil and
+    // the transaction uses the live native precheck/dispatch/recapture. Tests set a
+    // fake to drive every failure class without native input or live capture.
+    var modernActionHooksOverride: ModernActionHooks?
 
     public init(snapshotHandleStore: SnapshotHandleStore = SnapshotHandleStore()) {
         self.snapshotHandleStore = snapshotHandleStore
@@ -505,6 +509,10 @@ public final class ComputerUseService: @unchecked Sendable {
         FileHandle.standardError.write(Data(("snapshot-store " + message + "\n").utf8))
     }
 
+    // Legacy click. Implicit-snapshot path: currentSnapshot may capture fresh state
+    // if the cache is cold. Retained byte-for-byte for the compatibility window and
+    // isolated here; the modern era never reaches this fallback (see M5 deprecation
+    // of the implicit cache once legacy support is dropped).
     public func click(
         app query: String,
         elementIndex: String?,
@@ -526,6 +534,37 @@ public final class ComputerUseService: @unchecked Sendable {
         )
 
         let snapshot = try currentSnapshot(for: query)
+        try dispatchClick(
+            on: snapshot,
+            elementIndex: elementIndex,
+            x: x,
+            y: y,
+            clickCount: clickCount,
+            mouseButton: mouseButton,
+            clickMethod: clickMethod
+        )
+        return snapshotResult(
+            for: try refreshSnapshot(
+                for: query,
+                recoveryPolicy: clickActionSnapshotRecoveryPolicy(for: clickMethod)
+            ),
+            style: .actionResult
+        )
+    }
+
+    // The click dispatch core: performs exactly one click against the GIVEN
+    // snapshot and returns without recapturing. Both the legacy path (stored/live
+    // via currentSnapshot) and the modern transaction (the stored snapshot bound to
+    // a snapshot_ref) call this so the input behavior is single-sourced.
+    private func dispatchClick(
+        on snapshot: AppSnapshot,
+        elementIndex: String?,
+        x: Double?,
+        y: Double?,
+        clickCount: Int,
+        mouseButton: String,
+        clickMethod: ClickMethod
+    ) throws {
         let button = MouseButtonKind(rawValue: mouseButton.lowercased()) ?? .left
         if snapshot.mode == .fixture {
             guard clickMethod == .auto else {
@@ -554,7 +593,7 @@ public final class ComputerUseService: @unchecked Sendable {
 
             Thread.sleep(forTimeInterval: 0.15)
             pulseVisualCursor(at: cursorTarget, clickCount: clickCount, mouseButton: button)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return
         }
 
         if let elementIndex {
@@ -682,18 +721,16 @@ public final class ComputerUseService: @unchecked Sendable {
         } else {
             throw ComputerUseError.invalidArguments("click requires either element_index or x/y")
         }
-
-        return snapshotResult(
-            for: try refreshSnapshot(
-                for: query,
-                recoveryPolicy: clickActionSnapshotRecoveryPolicy(for: clickMethod)
-            ),
-            style: .actionResult
-        )
     }
 
+    // Legacy perform_secondary_action. Implicit-snapshot path; see click's note.
     public func performSecondaryAction(app query: String, elementIndex: String, action: String) throws -> ToolCallResult {
         let snapshot = try currentSnapshot(for: query)
+        try dispatchSecondaryAction(on: snapshot, elementIndex: elementIndex, action: action)
+        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+    }
+
+    private func dispatchSecondaryAction(on snapshot: AppSnapshot, elementIndex: String, action: String) throws {
         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
 
         if snapshot.mode == .fixture {
@@ -701,7 +738,7 @@ public final class ComputerUseService: @unchecked Sendable {
                 throw ComputerUseError.message(invalidSecondaryActionMessage(action: action, record: record))
             }
 
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return
         }
 
         guard let rawAction = matchingAction(requested: action, record: record) else {
@@ -718,19 +755,30 @@ public final class ComputerUseService: @unchecked Sendable {
         }
 
         Thread.sleep(forTimeInterval: 0.15)
+    }
+
+    // Legacy scroll. Implicit-snapshot path; see click's note. Direction/pages are
+    // validated before any snapshot capture, matching the pre-M4 ordering.
+    public func scroll(app query: String, direction: String, elementIndex: String, pages: Double) throws -> ToolCallResult {
+        try validateScrollArguments(direction: direction, pages: pages)
+        let snapshot = try currentSnapshot(for: query)
+        try dispatchScroll(on: snapshot, direction: direction, elementIndex: elementIndex, pages: pages)
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
-    public func scroll(app query: String, direction: String, elementIndex: String, pages: Double) throws -> ToolCallResult {
-        let normalized = direction.lowercased()
-        guard ["up", "down", "left", "right"].contains(normalized) else {
+    private func validateScrollArguments(direction: String, pages: Double) throws {
+        guard ["up", "down", "left", "right"].contains(direction.lowercased()) else {
             throw ComputerUseError.message("Invalid scroll direction: \(direction)")
         }
         guard pages.isFinite, pages > 0 else {
             throw ComputerUseError.message("pages must be > 0")
         }
+    }
 
-        let snapshot = try currentSnapshot(for: query)
+    private func dispatchScroll(on snapshot: AppSnapshot, direction: String, elementIndex: String, pages: Double) throws {
+        try validateScrollArguments(direction: direction, pages: pages)
+        let normalized = direction.lowercased()
+
         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
 
         if snapshot.mode == .fixture {
@@ -739,7 +787,7 @@ public final class ComputerUseService: @unchecked Sendable {
             }
             try FixtureBridge.post(FixtureCommand(kind: "scroll", identifier: identifier, direction: normalized, pages: pages))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return
         }
 
         if let repeatCount = integralScrollPageCount(pages),
@@ -760,16 +808,20 @@ public final class ComputerUseService: @unchecked Sendable {
         } else {
             throw ComputerUseError.stateUnavailable("element \(elementIndex) has no scrollable frame")
         }
+    }
 
+    // Legacy drag. Implicit-snapshot path; see click's note.
+    public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
+        let snapshot = try currentSnapshot(for: query)
+        try dispatchDrag(on: snapshot, fromX: fromX, fromY: fromY, toX: toX, toY: toY)
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
-    public func drag(app query: String, fromX: Double, fromY: Double, toX: Double, toY: Double) throws -> ToolCallResult {
-        let snapshot = try currentSnapshot(for: query)
+    private func dispatchDrag(on snapshot: AppSnapshot, fromX: Double, fromY: Double, toX: Double, toY: Double) throws {
         if snapshot.mode == .fixture {
             try FixtureBridge.post(FixtureCommand(kind: "drag", identifier: "fixture-drag-pad", x: fromX, y: fromY, toX: toX, toY: toY))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return
         }
 
         let start = try screenshotToGlobalPoint(snapshot: snapshot, x: fromX, y: fromY)
@@ -780,20 +832,25 @@ public final class ComputerUseService: @unchecked Sendable {
             targetDescription: "from=(\(Int(fromX)), \(Int(fromY))) to=(\(Int(toX)), \(Int(toY)))",
             snapshot: snapshot
         )
+    }
+
+    // Legacy type_text. Implicit-snapshot path; see click's note.
+    public func typeText(app query: String, text: String) throws -> ToolCallResult {
+        let snapshot = try currentSnapshot(for: query)
+        try dispatchTypeText(on: snapshot, text: text)
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
-    public func typeText(app query: String, text: String) throws -> ToolCallResult {
-        let snapshot = try currentSnapshot(for: query)
+    private func dispatchTypeText(on snapshot: AppSnapshot, text: String) throws {
         if snapshot.mode == .fixture {
             try FixtureBridge.post(FixtureCommand(kind: "type_text", identifier: "fixture-input", value: text))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return
         }
 
         if try typeTextBySettingFocusedValueIfAvailable(text, in: snapshot) {
             Thread.sleep(forTimeInterval: 0.1)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return
         }
 
         guard try canTypeTextUsingKeyboardFallback(in: snapshot) else {
@@ -801,23 +858,33 @@ public final class ComputerUseService: @unchecked Sendable {
         }
 
         try InputSimulation.typeText(text, pid: snapshot.app.pid)
+    }
+
+    // Legacy press_key. Implicit-snapshot path; see click's note.
+    public func pressKey(app query: String, key: String) throws -> ToolCallResult {
+        let snapshot = try currentSnapshot(for: query)
+        try dispatchPressKey(on: snapshot, key: key)
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
-    public func pressKey(app query: String, key: String) throws -> ToolCallResult {
-        let snapshot = try currentSnapshot(for: query)
+    private func dispatchPressKey(on snapshot: AppSnapshot, key: String) throws {
         if snapshot.mode == .fixture {
             try FixtureBridge.post(FixtureCommand(kind: "press_key", identifier: "fixture-key-capture", value: key))
             Thread.sleep(forTimeInterval: 0.15)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return
         }
 
         try InputSimulation.pressKey(key, pid: snapshot.app.pid)
+    }
+
+    // Legacy set_value. Implicit-snapshot path; see click's note.
+    public func setValue(app query: String, elementIndex: String, value: String) throws -> ToolCallResult {
+        let snapshot = try currentSnapshot(for: query)
+        try dispatchSetValue(on: snapshot, elementIndex: elementIndex, value: value)
         return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
     }
 
-    public func setValue(app query: String, elementIndex: String, value: String) throws -> ToolCallResult {
-        let snapshot = try currentSnapshot(for: query)
+    private func dispatchSetValue(on snapshot: AppSnapshot, elementIndex: String, value: String) throws {
         let record = try lookupElement(snapshot: snapshot, index: elementIndex)
 
         if snapshot.mode == .fixture {
@@ -830,7 +897,7 @@ public final class ComputerUseService: @unchecked Sendable {
             try FixtureBridge.post(FixtureCommand(kind: "set_value", identifier: identifier, value: value))
             Thread.sleep(forTimeInterval: 0.15)
             settleVisualCursor(at: cursorTarget)
-            return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+            return
         }
 
         guard let element = record.element else {
@@ -857,7 +924,186 @@ public final class ComputerUseService: @unchecked Sendable {
         }
 
         settleVisualCursor(at: cursorTarget)
-        return snapshotResult(for: try refreshSnapshot(for: query), style: .actionResult)
+    }
+
+    // MARK: - Modern action transaction seam
+
+    // The live native dispatch used by the modern transaction: performs EXACTLY ONE
+    // native action from the STORED snapshot (never currentSnapshot/refreshSnapshot).
+    // Internal so the transaction (in ModernActionTransaction.swift) can call it
+    // while the per-tool dispatch cores and their private helpers stay encapsulated.
+    func liveDispatch(_ action: ModernAction, on snapshot: AppSnapshot) throws {
+        switch action {
+        case let .click(elementIndex, x, y, clickCount, mouseButton, clickMethod):
+            try dispatchClick(
+                on: snapshot,
+                elementIndex: elementIndex,
+                x: x,
+                y: y,
+                clickCount: clickCount,
+                mouseButton: mouseButton,
+                clickMethod: clickMethod
+            )
+        case let .performSecondaryAction(elementIndex, actionName):
+            try dispatchSecondaryAction(on: snapshot, elementIndex: elementIndex, action: actionName)
+        case let .scroll(direction, elementIndex, pages):
+            try dispatchScroll(on: snapshot, direction: direction, elementIndex: elementIndex, pages: pages)
+        case let .drag(fromX, fromY, toX, toY):
+            try dispatchDrag(on: snapshot, fromX: fromX, fromY: fromY, toX: toX, toY: toY)
+        case let .typeText(text):
+            try dispatchTypeText(on: snapshot, text: text)
+        case let .pressKey(key):
+            try dispatchPressKey(on: snapshot, key: key)
+        case let .setValue(elementIndex, value):
+            try dispatchSetValue(on: snapshot, elementIndex: elementIndex, value: value)
+        }
+    }
+
+    // Post-action recapture for the successor mint. Delegates to the same capture
+    // path get_app_state uses. Internal for the transaction seam.
+    func liveRecapture(query: String) throws -> AppSnapshot {
+        try refreshSnapshot(for: query)
+    }
+
+    // Screenshot pixel dimensions of a snapshot, for the successor structured
+    // content. Internal for the transaction seam.
+    func snapshotScreenshotPixels(_ snapshot: AppSnapshot) -> CGSize? {
+        screenshotPixelSize(snapshot: snapshot)
+    }
+
+    // Transaction steps 3 and 5, native side. Resolves the requested app to its
+    // current identity, PID, and on-screen window set, verifies those still match
+    // the handle's target, then revalidates the specific target the action will
+    // touch against the STORED snapshot. Throws with zero native input on any
+    // mismatch. Internal for the transaction seam; tests inject a fake precheck.
+    func liveModernPrecheck(_ action: ModernAction, query: String, record: SnapshotRecord) throws {
+        let current = try resolveCurrentTarget(query: query)
+        try verifyStoredTarget(
+            currentIdentity: current.targetIdentity,
+            currentPID: current.pid,
+            currentWindowIDs: current.windowIDs,
+            record: record
+        )
+        try revalidateModernTarget(action, record: record)
+    }
+
+    // Resolve the requested app to its CURRENT identity, PID, and the set of its
+    // on-screen window ids. Resolution failure (app gone / unlaunchable) is a target
+    // change, not an internal error. The window set is best-effort: it is empty when
+    // the process exposes no enumerable on-screen windows, and the window comparison
+    // is skipped in that case.
+    private func resolveCurrentTarget(query: String) throws -> (targetIdentity: String, pid: pid_t, windowIDs: Set<UInt32>) {
+        let descriptor: RunningAppDescriptor
+        do {
+            descriptor = try AppDiscovery.resolve(query)
+        } catch {
+            throw SnapshotRefError.make(.targetChanged, message: SnapshotRefMessages.targetChangedApp)
+        }
+        let identity = SnapshotAppIdentity(
+            normalizedName: descriptor.name,
+            bundleIdentifier: descriptor.bundleIdentifier,
+            executableIdentity: descriptor.runningApplication.executableURL?.standardizedFileURL.path,
+            pid: descriptor.pid
+        )
+        return (identity.targetIdentity, descriptor.pid, currentOnScreenWindowIDs(pid: descriptor.pid))
+    }
+
+    // Pure step-3 comparison, separated from native resolution so it is unit-testable
+    // directly. Identity or PID mismatch is an app target change. The window is
+    // compared only when the handle recorded one AND the current process exposes at
+    // least one on-screen window (either side lacking a window id skips the check):
+    // in that case the captured window must still be present, else the window is
+    // gone and the target changed.
+    func verifyStoredTarget(
+        currentIdentity: String,
+        currentPID: pid_t,
+        currentWindowIDs: Set<UInt32>,
+        record: SnapshotRecord
+    ) throws {
+        guard currentIdentity == record.target.identity, currentPID == record.app.pid else {
+            throw SnapshotRefError.make(.targetChanged, message: SnapshotRefMessages.targetChangedApp)
+        }
+        if let storedWindowID = record.windowID, !currentWindowIDs.isEmpty,
+           !currentWindowIDs.contains(storedWindowID) {
+            throw SnapshotRefError.make(.targetChanged, message: SnapshotRefMessages.targetChangedApp)
+        }
+    }
+
+    // On-screen window numbers owned by a PID. Empty when none can be enumerated, so
+    // the caller treats the window comparison as unavailable rather than a mismatch.
+    private func currentOnScreenWindowIDs(pid: pid_t) -> Set<UInt32> {
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        var ids = Set<UInt32>()
+        for window in info {
+            guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid,
+                  let number = window[kCGWindowNumber as String] as? UInt32 else {
+                continue
+            }
+            ids.insert(number)
+        }
+        return ids
+    }
+
+    // Revalidate the concrete target the action touches (step 5). Coordinate actions
+    // must stay inside the captured screenshot (an ARGUMENT error, not a stale
+    // snapshot); element actions require the stored element to still be present and
+    // (in accessibility mode) alive. Settable and action-name validity remain
+    // dispatch concerns so their specific, retryable errors are preserved.
+    // Internal so the production revalidation is unit-testable without a live app.
+    func revalidateModernTarget(_ action: ModernAction, record: SnapshotRecord) throws {
+        guard let snapshot = record.snapshot else {
+            throw SnapshotRefError.make(.targetChanged, message: SnapshotRefMessages.targetChangedElement)
+        }
+        switch action {
+        case let .click(elementIndex, x, y, _, _, _):
+            if let elementIndex {
+                try revalidateStoredElement(index: elementIndex, snapshot: snapshot)
+            } else if let x, let y {
+                try revalidateCoordinate(x: x, y: y, record: record)
+            }
+        case let .performSecondaryAction(elementIndex, _):
+            try revalidateStoredElement(index: elementIndex, snapshot: snapshot)
+        case let .scroll(_, elementIndex, _):
+            try revalidateStoredElement(index: elementIndex, snapshot: snapshot)
+        case let .drag(fromX, fromY, toX, toY):
+            try revalidateCoordinate(x: fromX, y: fromY, record: record)
+            try revalidateCoordinate(x: toX, y: toY, record: record)
+        case .typeText, .pressKey:
+            // Keyboard delivery is bound to the app/window/PID, already checked above.
+            break
+        case let .setValue(elementIndex, _):
+            try revalidateStoredElement(index: elementIndex, snapshot: snapshot)
+        }
+    }
+
+    // Strict half-open bounds: valid iff 0 <= x < width and 0 <= y < height. An
+    // out-of-bounds coordinate is an argument error (the handle stays valid), so it
+    // surfaces as plain isError text, not a snapshot-taxonomy error.
+    private func revalidateCoordinate(x: Double, y: Double, record: SnapshotRecord) throws {
+        guard let pixels = record.screenshotPixels else {
+            return
+        }
+        guard x >= 0, y >= 0, x < Double(pixels.width), y < Double(pixels.height) else {
+            throw ModernActionArgumentError(modernCoordinatesOutOfBoundsMessage)
+        }
+    }
+
+    private func revalidateStoredElement(index: String, snapshot: AppSnapshot) throws {
+        guard let parsed = Int(index), let element = snapshot.elements[parsed] else {
+            throw SnapshotRefError.make(.targetChanged, message: SnapshotRefMessages.targetChangedElement)
+        }
+        // Fixture elements carry no native AXUIElement; the fixture bridge validates
+        // them at dispatch. In accessibility mode the stored element must still be
+        // present and alive (exposes a role); a dead or nil element is a target change.
+        if snapshot.mode == .fixture {
+            return
+        }
+        guard let axElement = element.element,
+              stringValue(of: axElement, attribute: kAXRoleAttribute) != nil else {
+            throw SnapshotRefError.make(.targetChanged, message: SnapshotRefMessages.targetChangedElement)
+        }
     }
 
     private func currentSnapshot(for query: String) throws -> AppSnapshot {

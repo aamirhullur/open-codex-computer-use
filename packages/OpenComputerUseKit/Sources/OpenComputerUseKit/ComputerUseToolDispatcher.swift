@@ -50,7 +50,26 @@ public final class ComputerUseToolDispatcher {
         try callTool(name: name, arguments: arguments, modern: false)
     }
 
+    // The seven modern action tools that require and consume a snapshot_ref through
+    // the M4 transaction. list_apps and get_app_state never take a handle.
+    private static let modernActionTools: Set<String> = [
+        "click",
+        "perform_secondary_action",
+        "scroll",
+        "drag",
+        "type_text",
+        "press_key",
+        "set_value",
+    ]
+
     public func callTool(name: String, arguments: [String: Any], modern: Bool) throws -> ToolCallResult {
+        // Modern era: the action tools go through the snapshot_ref transaction. The
+        // legacy switch below still serves the legacy era (implicit-snapshot path)
+        // and the two handle-free tools in both eras.
+        if modern, ComputerUseToolDispatcher.modernActionTools.contains(name) {
+            return try callModernAction(name: name, arguments: arguments)
+        }
+
         switch name {
         case "list_apps":
             return service.listApps()
@@ -110,6 +129,105 @@ public final class ComputerUseToolDispatcher {
                 app: requireString("app", in: arguments),
                 elementIndex: requireElementIndex(in: arguments),
                 value: requireString("value", in: arguments)
+            )
+        default:
+            throw ComputerUseError.unsupportedTool(name)
+        }
+    }
+
+    // The dispatcher-level resolve step for a modern action: validate the
+    // snapshot_ref BEFORE any side effect (including app resolution), parse the
+    // action arguments, then resolve + CAS the handle to in_flight and run the
+    // service transaction. A missing or malformed ref returns immediately, before
+    // any app is touched.
+    private func callModernAction(name: String, arguments: [String: Any]) throws -> ToolCallResult {
+        // Step 1: presence, before app parsing or resolution. Trim first so a
+        // whitespace-only value is treated as missing (Go parity), not malformed.
+        let ref = (arguments["snapshot_ref"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !ref.isEmpty else {
+            return SnapshotRefError.make(.missing, message: SnapshotRefMessages.missing).toToolCallResult()
+        }
+        // Step 1b: format, still before app resolution.
+        guard SnapshotHandleStore.isWellFormed(ref) else {
+            return SnapshotRefError.make(.malformed, message: SnapshotRefMessages.malformed).toToolCallResult()
+        }
+
+        // Parse the action and app. Argument errors surface as ordinary tool errors
+        // here, before a handle is acquired, so nothing needs to be released.
+        let appQuery = try requireString("app", in: arguments)
+        let action = try parseModernAction(name: name, arguments: arguments)
+
+        // Steps 2+4: resolve the handle and CAS it to in_flight under the store lock.
+        let record: SnapshotRecord
+        switch service.handleStore.beginInFlight(ref) {
+        case let .success(resolved):
+            record = resolved
+        case let .failure(error):
+            return error.toToolCallResult()
+        }
+
+        let context = SnapshotContext(
+            record: record,
+            generation: record.generation,
+            store: service.handleStore
+        )
+        return service.performModernAction(action, appQuery: appQuery, context: context)
+    }
+
+    // Build a ModernAction from tool arguments, reusing the same argument parsing and
+    // validation the legacy path uses. Click method/argument validation runs here so
+    // an invalid request is rejected before a handle is acquired.
+    private func parseModernAction(name: String, arguments: [String: Any]) throws -> ModernAction {
+        switch name {
+        case "click":
+            let elementIndex = optionalElementIndex(in: arguments)
+            let clickCount = Int(optionalDouble("click_count", in: arguments) ?? 1)
+            let mouseButton = optionalString("mouse_button", in: arguments) ?? "left"
+            let clickMethod = try parseClickMethod(optionalString("click_method", in: arguments))
+            try validateClickMethod(
+                clickMethod,
+                hasElementIndex: elementIndex != nil,
+                environment: ProcessInfo.processInfo.environment
+            )
+            try validateSkyClickArguments(
+                method: clickMethod,
+                mouseButton: mouseButton,
+                clickCount: clickCount
+            )
+            return .click(
+                elementIndex: elementIndex,
+                x: optionalDouble("x", in: arguments),
+                y: optionalDouble("y", in: arguments),
+                clickCount: clickCount,
+                mouseButton: mouseButton,
+                clickMethod: clickMethod
+            )
+        case "perform_secondary_action":
+            return .performSecondaryAction(
+                elementIndex: try requireElementIndex(in: arguments),
+                action: try requireString("action", in: arguments)
+            )
+        case "scroll":
+            return .scroll(
+                direction: try requireString("direction", in: arguments),
+                elementIndex: try requireElementIndex(in: arguments),
+                pages: optionalDouble("pages", in: arguments) ?? 1
+            )
+        case "drag":
+            return .drag(
+                fromX: try requireDouble("from_x", in: arguments),
+                fromY: try requireDouble("from_y", in: arguments),
+                toX: try requireDouble("to_x", in: arguments),
+                toY: try requireDouble("to_y", in: arguments)
+            )
+        case "type_text":
+            return .typeText(text: try requireString("text", in: arguments))
+        case "press_key":
+            return .pressKey(key: try requireString("key", in: arguments))
+        case "set_value":
+            return .setValue(
+                elementIndex: try requireElementIndex(in: arguments),
+                value: try requireString("value", in: arguments)
             )
         default:
             throw ComputerUseError.unsupportedTool(name)

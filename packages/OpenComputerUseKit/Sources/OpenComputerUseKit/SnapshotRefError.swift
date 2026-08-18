@@ -5,6 +5,28 @@ import Foundation
 // retry hint travel in structuredContent.error. M2 defines the constants and
 // serialization; M4 wires them into action enforcement.
 
+// Canonical, cross-platform snapshot-ref error messages. Byte-identical to the Go
+// Msg* constants in packages/go-mcp/snapshoterr.go; the shared modern fixtures pin
+// the missing and malformed wording. Every string names the recovery: recapture
+// with get_app_state, or (for in_use) retry the same handle once it frees. Keep
+// these identical across platforms. A single code (target_changed,
+// action_outcome_uncertain) carries two messages depending on the transition, so
+// call sites select the specific constant.
+public enum SnapshotRefMessages {
+    public static let missing = "Missing required argument: snapshot_ref. Call get_app_state and pass the returned snapshot_ref."
+    public static let malformed = "Malformed snapshot_ref. Call get_app_state and pass the returned snapshot_ref."
+    public static let unknown = "Unknown snapshot_ref. Call get_app_state and pass the returned snapshot_ref."
+    public static let expired = "Expired snapshot_ref. Call get_app_state and pass the returned snapshot_ref."
+    public static let stale = "Stale snapshot_ref; it was superseded by a newer snapshot. Call get_app_state and pass the returned snapshot_ref."
+    public static let inUse = "snapshot_ref is already in use by an in-flight action. Retry with the same snapshot_ref after the in-flight action completes."
+    // target_changed carries two transition-specific messages.
+    public static let targetChangedApp = "The requested app no longer matches the snapshot target. Call get_app_state and pass the returned snapshot_ref."
+    public static let targetChangedElement = "The targeted element no longer matches the captured snapshot. Call get_app_state and pass the returned snapshot_ref."
+    // action_outcome_uncertain carries two transition-specific messages.
+    public static let outcomeUncertain = "The action was dispatched but its outcome is unknown. Call get_app_state and pass the returned snapshot_ref before retrying."
+    public static let refreshFailed = "The action likely succeeded, but the updated state could not be recaptured. Call get_app_state and pass the returned snapshot_ref before continuing."
+}
+
 public enum SnapshotRefErrorCode: String {
     case missing = "snapshot_ref_missing"
     case malformed = "snapshot_ref_malformed"
@@ -78,21 +100,21 @@ extension SnapshotRefErrorCode {
     var defaultMessage: String {
         switch self {
         case .missing:
-            return "snapshot_ref is required. Call get_app_state first and pass the snapshot_ref it returns."
+            return SnapshotRefMessages.missing
         case .malformed:
-            return "snapshot_ref is malformed. Call get_app_state and pass the snapshot_ref it returns verbatim."
+            return SnapshotRefMessages.malformed
         case .unknown:
-            return "snapshot_ref is unknown. Call get_app_state to capture fresh state."
+            return SnapshotRefMessages.unknown
         case .expired:
-            return "snapshot_ref has expired. Call get_app_state to capture fresh state."
+            return SnapshotRefMessages.expired
         case .stale:
-            return "snapshot_ref is stale; a newer snapshot exists. Call get_app_state to capture fresh state."
+            return SnapshotRefMessages.stale
         case .inUse:
-            return "snapshot_ref is in use by another action. Retry with the same snapshot_ref once it completes."
+            return SnapshotRefMessages.inUse
         case .targetChanged:
-            return "The app or window changed since this snapshot_ref was captured. Call get_app_state to capture fresh state."
+            return SnapshotRefMessages.targetChangedApp
         case .actionOutcomeUncertain:
-            return "The action outcome is uncertain, so this snapshot_ref was invalidated. Call get_app_state to capture fresh state."
+            return SnapshotRefMessages.outcomeUncertain
         }
     }
 }

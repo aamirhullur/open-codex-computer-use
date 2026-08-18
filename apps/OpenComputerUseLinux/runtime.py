@@ -29,6 +29,14 @@ MAX_DEPTH = 64
 DEFAULT_TEXT_LIMIT = 500
 
 
+class RejectedBeforeInput(RuntimeError):
+    """A validation failure raised from a site that provably precedes any native
+    input. main() tags these with errorKind rejected_before_input so Go restores
+    the handle to live (a same-handle retry is safe). Raise sites where input may
+    already have been dispatched must NOT use this class; they stay plain
+    RuntimeError and Go treats the outcome as uncertain (fail-safe)."""
+
+
 def frame(x, y, width, height):
     if width is None or height is None or width < 0 or height < 0:
         return None
@@ -545,6 +553,28 @@ def find_element(app, record):
     return None
 
 
+def expectation_mismatch(node, expected_role, expected_name):
+    """Report whether a resolved node fails the stored element expectations.
+
+    The modern action transaction sends expected_role (and expected_name when the
+    stored name is stable) so the runtime can revalidate that the node resolved
+    from the stored runtimeId still matches the element the model observed, before
+    performing any native action. When neither expectation is present (every
+    legacy invocation, and modern actions that carry no element) there is nothing
+    to check, so this reports no mismatch and behavior is byte-identical to
+    before. A missing node with an expectation is itself a mismatch.
+    """
+    if not expected_role and not expected_name:
+        return False
+    if node is None:
+        return True
+    if expected_role and node_role(node) != expected_role:
+        return True
+    if expected_name and node_name(node) != expected_name:
+        return True
+    return False
+
+
 def preferred_action_index(node):
     preferred_exact = {
         "click",
@@ -586,7 +616,8 @@ def screen_point(window_bounds, element=None, x=None, y=None):
                 window_bounds["y"] + f["y"] + f["height"] / 2,
             )
     if x is None or y is None or window_bounds is None:
-        raise RuntimeError("coordinate action requires window bounds and x/y")
+        # No clickable point could be derived; nothing has been dispatched yet.
+        raise RejectedBeforeInput("coordinate action requires window bounds and x/y")
     return window_bounds["x"] + float(x), window_bounds["y"] + float(y)
 
 
@@ -743,7 +774,7 @@ def set_element_value(node, value):
 
 def invoke_secondary_action(node, action):
     if node is None:
-        raise RuntimeError("unknown element_index")
+        raise RejectedBeforeInput("unknown element_index")
     normalized = str(action).lower()
     count = int(safe(node.get_n_actions, 0) or 0)
     for index in range(count):
@@ -791,23 +822,37 @@ def perform_operation(operation):
     element_record = operation.get("element")
     element = find_element(app, element_record)
 
+    # Modern-era element revalidation (transaction step 5): when the request
+    # carries expectations, verify the resolved node still matches the stored
+    # element before performing any native action. A mismatch aborts with a
+    # structured marker Go maps to snapshot_target_changed; no action is done.
+    if expectation_mismatch(
+        element, operation.get("expected_role"), operation.get("expected_name")
+    ):
+        return {
+            "ok": False,
+            "error": "resolved element no longer matches the captured snapshot",
+            "errorKind": "element_mismatch",
+        }
+
     if tool == "click":
         click_method = (operation.get("click_method") or "auto").lower()
         if click_method == "accessibility":
             if element is None:
-                raise RuntimeError("click_method 'accessibility' requires element_index")
+                raise RejectedBeforeInput("click_method 'accessibility' requires element_index")
             if operation.get("mouse_button", "left") != "left":
-                raise RuntimeError(
+                raise RejectedBeforeInput(
                     "click_method 'accessibility' only supports mouse_button 'left'"
                 )
             if not do_action_by_index(element, preferred_action_index(element)):
+                # A do_action was already attempted; the outcome is uncertain.
                 raise RuntimeError(
                     "click_method 'accessibility' could not click the requested element"
                 )
         elif click_method == "app_post":
-            raise RuntimeError("click_method 'app_post' is not supported on Linux")
+            raise RejectedBeforeInput("click_method 'app_post' is not supported on Linux")
         elif click_method == "sky_click":
-            raise RuntimeError("click_method 'sky_click' is not supported on Linux")
+            raise RejectedBeforeInput("click_method 'sky_click' is not supported on Linux")
         elif click_method == "global":
             x, y = screen_point(
                 bounds,
@@ -836,7 +881,7 @@ def perform_operation(operation):
                     operation.get("click_count", 1),
                 )
         else:
-            raise RuntimeError("Invalid click_method '{}'".format(click_method))
+            raise RejectedBeforeInput("Invalid click_method '{}'".format(click_method))
     elif tool == "perform_secondary_action":
         invoke_secondary_action(element, operation.get("action", ""))
     elif tool == "scroll":
@@ -854,11 +899,12 @@ def perform_operation(operation):
         send_key(operation.get("key", ""))
     elif tool == "set_value":
         if element is None:
-            raise RuntimeError("unknown element_index")
+            raise RejectedBeforeInput("unknown element_index")
         if not set_element_value(element, operation.get("value", "")):
+            # set_element_value already attempted a native set; leave unmarked.
             raise RuntimeError("Cannot set a value for an element that is not settable")
     else:
-        raise RuntimeError('unsupportedTool("{}")'.format(tool))
+        raise RejectedBeforeInput('unsupportedTool("{}")'.format(tool))
 
     time.sleep(0.12)
     return {"ok": True, "snapshot": build_snapshot(operation.get("app", ""))}
@@ -873,6 +919,12 @@ def main():
         operation = json.load(file)
     try:
         response = perform_operation(operation)
+    except RejectedBeforeInput as exc:
+        response = {
+            "ok": False,
+            "error": str(exc),
+            "errorKind": "rejected_before_input",
+        }
     except Exception as exc:
         response = {"ok": False, "error": str(exc)}
     print(json.dumps(response, separators=(",", ":")))

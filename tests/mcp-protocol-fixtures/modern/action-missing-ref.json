@@ -1,0 +1,41 @@
+{
+  "name": "modern-action-missing-ref",
+  "description": "A modern tools/call for an action tool (click) that names an app but omits snapshot_ref is rejected before any side effect. The result is a decorated modern isError tool result whose structuredContent.error reports snapshot_ref_missing with retry new_state. The error precedes all platform code, so the bytes are identical on Linux, Windows, and macOS.",
+  "steps": [
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 401,
+        "method": "tools/call",
+        "params": {
+          "name": "click",
+          "arguments": {"app": "Text Editor", "element_index": 0},
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "probe", "version": "0"}
+          }
+        }
+      },
+      "expect": {
+        "jsonrpc": "2.0",
+        "id": 401,
+        "result": {
+          "resultType": "complete",
+          "content": [{"type": "text", "text": "Missing required argument: snapshot_ref. Call get_app_state and pass the returned snapshot_ref."}],
+          "isError": true,
+          "structuredContent": {
+            "error": {
+              "code": "snapshot_ref_missing",
+              "message": "Missing required argument: snapshot_ref. Call get_app_state and pass the returned snapshot_ref.",
+              "retry": "new_state"
+            }
+          },
+          "_meta": {
+            "io.modelcontextprotocol/serverInfo": {"name": "open-computer-use", "version": "<VERSION>"}
+          }
+        }
+      }
+    }
+  ]
+}

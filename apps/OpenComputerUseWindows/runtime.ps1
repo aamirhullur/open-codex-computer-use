@@ -68,6 +68,18 @@ $WM_CHAR = 0x0102
 $EM_SETSEL = 0x00B1
 $EM_REPLACESEL = 0x00C2
 
+# Set when a validation failure is raised from a site that provably precedes any
+# native input, so the catch block can tag the response errorKind
+# rejected_before_input (Go then restores the handle to live for a same-handle
+# retry). Raise sites where native input may already have happened stay plain
+# throws and remain uncertain (fail-safe).
+$script:RejectedBeforeInput = $false
+
+function Deny-BeforeInput([string]$message) {
+    $script:RejectedBeforeInput = $true
+    throw $message
+}
+
 function Test-EnvFlagEnabled([string]$name) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if ([string]::IsNullOrWhiteSpace($value)) {
@@ -700,6 +712,31 @@ function Find-Element($process, $record) {
     return $null
 }
 
+function Test-ExpectationMismatch($element, [string]$expectedRole, [string]$expectedName) {
+    # Modern-era element revalidation (transaction step 5): when the request
+    # carries expectations, verify the resolved node still matches the stored
+    # element's role (and stable name) before performing any native action. With
+    # no expectations (every legacy invocation, and modern actions with no
+    # element) there is nothing to check, so behavior is byte-identical to before.
+    if ([string]::IsNullOrEmpty($expectedRole) -and [string]::IsNullOrEmpty($expectedName)) {
+        return $false
+    }
+    if ($null -eq $element) {
+        return $true
+    }
+    if (-not [string]::IsNullOrEmpty($expectedRole)) {
+        if ((Get-ElementControlTypeName $element) -ne $expectedRole) {
+            return $true
+        }
+    }
+    if (-not [string]::IsNullOrEmpty($expectedName)) {
+        if ((Get-ElementString $element "Name") -ne $expectedName) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-CurrentPatternOrNull($element, $pattern) {
     try {
         return $element.GetCurrentPattern($pattern)
@@ -909,17 +946,24 @@ try {
         $windowBounds = $operation.windowBounds
         $element = Find-Element $process $operation.element
 
-        switch ($operation.tool) {
+        if (Test-ExpectationMismatch $element ([string]$operation.expected_role) ([string]$operation.expected_name)) {
+            # The resolved node no longer matches the stored element; abort with a
+            # structured marker Go maps to snapshot_target_changed. No native
+            # action is performed.
+            $response = [pscustomobject]@{ ok = $false; error = "resolved element no longer matches the captured snapshot"; errorKind = "element_mismatch" }
+        } else {
+            switch ($operation.tool) {
             "click" {
                 $clickMethod = [string]$operation.click_method
                 if ([string]::IsNullOrWhiteSpace($clickMethod)) { $clickMethod = "auto" }
 
                 if ($clickMethod -eq "accessibility") {
-                    if ($null -eq $element) { throw "click_method 'accessibility' requires element_index" }
+                    if ($null -eq $element) { Deny-BeforeInput "click_method 'accessibility' requires element_index" }
                     if ($operation.mouse_button -eq "right" -or $operation.mouse_button -eq "middle") {
-                        throw "click_method 'accessibility' does not support mouse_button '$($operation.mouse_button)'"
+                        Deny-BeforeInput "click_method 'accessibility' does not support mouse_button '$($operation.mouse_button)'"
                     }
                     if (-not (Invoke-PreferredClick $element)) {
+                        # Invoke was already attempted; the outcome is uncertain.
                         throw "click_method 'accessibility' could not click the requested element"
                     }
                 } elseif ($clickMethod -eq "app_post") {
@@ -933,9 +977,9 @@ try {
                     }
                     Send-MouseClick $hwnd $point.x $point.y $operation.mouse_button ([int]$operation.click_count)
                 } elseif ($clickMethod -eq "global") {
-                    throw "click_method 'global' is not supported on Windows"
+                    Deny-BeforeInput "click_method 'global' is not supported on Windows"
                 } elseif ($clickMethod -eq "sky_click") {
-                    throw "click_method 'sky_click' is not supported on Windows"
+                    Deny-BeforeInput "click_method 'sky_click' is not supported on Windows"
                 } elseif ($clickMethod -eq "auto") {
                     $handled = $false
                     if ($null -ne $element -and $operation.mouse_button -ne "right" -and $operation.mouse_button -ne "middle") {
@@ -953,11 +997,11 @@ try {
                         Send-MouseClick $hwnd $point.x $point.y $operation.mouse_button ([int]$operation.click_count)
                     }
                 } else {
-                    throw "Invalid click_method '$clickMethod'"
+                    Deny-BeforeInput "Invalid click_method '$clickMethod'"
                 }
             }
             "perform_secondary_action" {
-                if ($null -eq $element) { throw "unknown element_index '$($operation.element.index)'" }
+                if ($null -eq $element) { Deny-BeforeInput "unknown element_index '$($operation.element.index)'" }
                 Invoke-SecondaryAction $element $operation.action
             }
             "scroll" {
@@ -982,27 +1026,32 @@ try {
                 Send-Key $hwnd $operation.key
             }
             "set_value" {
-                if ($null -eq $element) { throw "unknown element_index '$($operation.element.index)'" }
+                if ($null -eq $element) { Deny-BeforeInput "unknown element_index '$($operation.element.index)'" }
                 $valuePattern = Get-CurrentPatternOrNull $element ([Windows.Automation.ValuePattern]::Pattern)
                 if ($null -eq $valuePattern) {
-                    throw "Cannot set a value for an element that is not settable"
+                    Deny-BeforeInput "Cannot set a value for an element that is not settable"
                 }
                 $valuePattern.SetValue($operation.value)
             }
             default {
-                throw "unsupportedTool(`"$($operation.tool)`")"
+                Deny-BeforeInput "unsupportedTool(`"$($operation.tool)`")"
             }
-        }
+            }
 
-        Start-Sleep -Milliseconds 120
-        $response = [pscustomobject]@{ ok = $true; snapshot = (Build-Snapshot $operation.app) }
+            Start-Sleep -Milliseconds 120
+            $response = [pscustomobject]@{ ok = $true; snapshot = (Build-Snapshot $operation.app) }
+        }
     }
 } catch {
     $message = $_.Exception.Message
     if (-not [string]::IsNullOrWhiteSpace($_.ScriptStackTrace)) {
         $message = "$message at $($_.ScriptStackTrace)"
     }
-    $response = [pscustomobject]@{ ok = $false; error = $message }
+    if ($script:RejectedBeforeInput) {
+        $response = [pscustomobject]@{ ok = $false; error = $message; errorKind = "rejected_before_input" }
+    } else {
+        $response = [pscustomobject]@{ ok = $false; error = $message }
+    }
 }
 
 $response | ConvertTo-Json -Depth 50 -Compress
