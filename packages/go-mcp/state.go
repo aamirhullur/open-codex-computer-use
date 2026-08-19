@@ -89,3 +89,20 @@ func (s StructuredState) StructuredContent() map[string]any {
 func roundToInt(v float64) int {
 	return int(math.Round(v))
 }
+
+// SuccessorRef extracts the successor snapshot_ref a modern get_app_state or
+// action result carries in its structuredContent. It returns the handle and true
+// only when the "snapshot_ref" key holds a non-empty string; a legacy result (no
+// structuredContent) or an error envelope (which carries "error", not
+// "snapshot_ref") returns "" and false. The CLI batch path uses it to thread the
+// latest successor into subsequent action calls that omit the reference.
+func SuccessorRef(structuredContent map[string]any) (string, bool) {
+	if structuredContent == nil {
+		return "", false
+	}
+	ref, ok := structuredContent[SnapshotRefKey].(string)
+	if !ok || ref == "" {
+		return "", false
+	}
+	return ref, true
+}

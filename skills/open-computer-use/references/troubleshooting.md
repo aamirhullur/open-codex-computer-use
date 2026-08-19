@@ -85,6 +85,19 @@ If an element-targeted action fails:
 4. Prefer `perform_secondary_action` only for actions exposed in the state result.
 5. Use coordinate `click`, `scroll`, or `drag` only after the semantic route is unavailable.
 
+## Snapshot Reference Errors (Modern MCP)
+
+Modern MCP `2026-07-28` hosts thread an explicit `snapshot_ref` from `get_app_state` into each action. When an action returns `isError: true` with a `structuredContent.error.code`, use the code to decide between recapturing and retrying:
+
+- `snapshot_ref_missing` / `snapshot_ref_malformed`: the action was called without a valid handle. Call `get_app_state` and pass the returned `snapshot_ref` (also printed near the top of the visible text) into the action.
+- `snapshot_ref_unknown` / `snapshot_ref_expired`: the handle is gone (past its 120-second TTL, or the runtime restarted). Recapture with `get_app_state` and use the fresh handle. Do not retry the old one.
+- `snapshot_ref_stale`: a newer generation for this target exists (a successful action already superseded this handle). Use the successor handle returned by the last successful result, or recapture.
+- `snapshot_ref_in_use`: another action is already running against this handle. This is a concurrency guard, not a target change. Wait for that action to finish and use its successor handle; no input was performed.
+- `snapshot_target_changed`: the app/PID/window or element no longer matches what was captured. No input was performed. Recapture with `get_app_state`.
+- `snapshot_action_outcome_uncertain`: dispatch started but its result could not be confirmed. Do not retry automatically. Recapture with `get_app_state` and re-observe before acting.
+
+Rule of thumb: `_in_use` means wait and reuse the successor; `_stale` means use the successor handle; every other code means recapture with `get_app_state`. Legacy `2025-03-26` hosts do not pass handles and do not see these codes.
+
 ## Desktop Session Issues
 
 Windows UI Automation and Linux AT-SPI require a live user desktop. SSH sessions, CI jobs, launch daemons, or services often do not have access to the GUI session even when the CLI binary starts successfully.

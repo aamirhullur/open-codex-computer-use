@@ -1608,16 +1608,7 @@ func runCallCommand(args []string, svc *service) (any, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		var outputs []map[string]any
-		hasError := false
-		for _, call := range calls {
-			result := svc.callTool(call.Tool, call.Args, false)
-			outputs = append(outputs, map[string]any{"tool": call.Tool, "result": result})
-			if result.IsError {
-				hasError = true
-				break
-			}
-		}
+		outputs, hasError := executeCallSequence(svc, calls, strictSnapshotsEnabled())
 		return outputs, hasError, nil
 	}
 
@@ -1628,13 +1619,106 @@ func runCallCommand(args []string, svc *service) (any, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	result := svc.callTool(toolName, arguments, false)
+	// A single call runs the same per-call era decision as a batch, with no prior
+	// successor to thread: an explicit snapshot_ref (or strict mode) selects the
+	// modern era; a legacy single call (no ref, no env) stays modern=false and
+	// byte-identical.
+	modern, arguments := decideCall(toolName, arguments, strictSnapshotsEnabled(), "")
+	result := svc.callTool(toolName, arguments, modern)
 	return result, result.IsError, nil
 }
 
 type callSpec struct {
 	Tool string
 	Args map[string]any
+}
+
+// strictSnapshotsEnabled reports whether the opt-in strict snapshot mode is on.
+// It mirrors the truthy parsing used by the other environment gates in this app.
+// In strict mode the CLI batch path runs get_app_state and every action call on
+// the modern era so an action that lacks a snapshot_ref (and cannot be
+// auto-threaded from a prior successor) fails with the pinned missing-ref message
+// rather than silently using implicit legacy state.
+func strictSnapshotsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OPEN_COMPUTER_USE_STRICT_SNAPSHOTS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// executeCallSequence runs a CLI batch against one shared in-process service,
+// stopping at the first isError result. It threads the modern snapshot handle:
+//
+//	(a) a call whose args carry an explicit snapshot_ref dispatches modern;
+//	(b) strict mode dispatches get_app_state and every action call modern, so an
+//	    action lacking a ref that cannot be auto-threaded surfaces the pinned
+//	    missing-ref error from the modern action transaction;
+//	(c) auto-threading fills the latest successor snapshot_ref (from a prior
+//	    modern result's structuredContent) into a later action call that omits it;
+//	(d) a legacy batch (no refs, no strict mode) mints nothing and threads
+//	    nothing: every call dispatches modern=false, byte-identical to before.
+func executeCallSequence(svc *service, calls []callSpec, strict bool) ([]map[string]any, bool) {
+	var outputs []map[string]any
+	hasError := false
+	latestRef := ""
+	for _, call := range calls {
+		modern, args := decideCall(call.Tool, call.Args, strict, latestRef)
+		result := svc.callTool(call.Tool, args, modern)
+		outputs = append(outputs, map[string]any{"tool": call.Tool, "result": result})
+		if ref, ok := gomcp.SuccessorRef(result.StructuredContent); ok {
+			latestRef = ref
+		}
+		if result.IsError {
+			hasError = true
+			break
+		}
+	}
+	return outputs, hasError
+}
+
+// decideCall picks the era for one call and the args to dispatch, given the
+// latest successor snapshot_ref threaded so far (empty for a single call). It is
+// the shared per-call decision behind both the single-call and batch CLI paths:
+//
+//	(a) an explicit snapshot_ref binds the call to the modern era;
+//	(c) an action tool with a threadable latest successor gets it auto-filled;
+//	(b) strict mode runs get_app_state and action tools modern (an action with
+//	    nothing to thread then surfaces the pinned missing-ref error);
+//	(d) otherwise the call stays legacy (modern=false) with args unchanged.
+func decideCall(tool string, args map[string]any, strict bool, latestRef string) (bool, map[string]any) {
+	switch {
+	case hasSnapshotRefArg(args):
+		return true, args
+	case gomcp.IsModernActionTool(tool):
+		switch {
+		case latestRef != "":
+			return true, withSnapshotRef(args, latestRef)
+		case strict:
+			return true, args
+		}
+	case strict && tool == "get_app_state":
+		return true, args
+	}
+	return false, args
+}
+
+// hasSnapshotRefArg reports whether a call carries a usable explicit snapshot_ref.
+func hasSnapshotRefArg(args map[string]any) bool {
+	_, present := snapshotRefArg(args)
+	return present
+}
+
+// withSnapshotRef returns a shallow copy of args with snapshot_ref set to ref,
+// leaving the caller's map untouched.
+func withSnapshotRef(args map[string]any, ref string) map[string]any {
+	clone := make(map[string]any, len(args)+1)
+	for key, value := range args {
+		clone[key] = value
+	}
+	clone[gomcp.SnapshotRefKey] = ref
+	return clone
 }
 
 func readArguments(inline, file string) (map[string]any, error) {

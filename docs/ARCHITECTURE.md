@@ -47,25 +47,37 @@
 
 ### 2. MCP 层
 
-- 面向 MCP host 的外部 transport 仍是 `stdio`；macOS 终端 CLI 到 `.app` app agent 之间额外有一层本地 Unix domain socket 代理，用来保证真实 automation 运行在 app bundle 权限身份下。
+- 面向 MCP host 的外部 transport 仍是 `stdio`；macOS 终端 CLI 到 `.app` app agent 之间额外有一层本地 Unix domain socket 代理，用来保证真实 automation 运行在 app bundle 权限身份下。用户接入命令没有变化，宿主仍然运行 `open-computer-use mcp`。
 - 当 `OPEN_COMPUTER_USE_VISUAL_CURSOR` 未被显式关闭时，`mcp` 命令会切到一个最小 AppKit runtime：主线程保留 event loop 承载 overlay UI，stdio server 仍在后台线程串行读取与响应。
 - 请求 framing 采用一行一个 JSON-RPC message。
-- 当前支持的 method：
+- stdio server 是 dual-era 的，macOS、Linux、Windows 三端行为一致，按连接第一条请求做一次 era 分类：
+  - 第一条请求带 modern `_meta`（`io.modelcontextprotocol/protocolVersion: "2026-07-28"` 加 `clientCapabilities`）时走 modern `2026-07-28` era；`server/discover` 是 modern 客户端的标准探测入口，但不是 modern 请求的必要前置。
+  - 第一条请求不带 modern `_meta`（例如 `initialize`）时走 legacy `2025-03-26` era；为了兼容既有 host，设计里原本的 “ambiguous-reject” 一行被覆盖为按 legacy 处理。
+  - era 分类后跨 era 切换在两个方向上都会被拒绝，避免单条连接一边累积隐式协商状态、一边改变语义。
+- modern era 支持的 method：`server/discover`、`tools/list`、`tools/call`。modern 请求必须在 `params._meta` 里带 protocol version 与 client capabilities，缺失或非法返回 JSON-RPC `-32602`，不支持的版本返回 `-32022` 并附上 `supported` / `requested`。每个成功的 modern result 由协议适配层集中补上 `resultType: "complete"` 和 `_meta.io.modelcontextprotocol/serverInfo`；`server/discover` 与 `tools/list` 还会带 `ttlMs: 300000` 与 `cacheScope: "public"` 缓存提示。modern era 不再暴露 `ping`。
+- legacy era 支持的 method 与旧版一致，wire 形态 byte-compatible：
   - `initialize`
   - `notifications/initialized`
   - `notifications/turn-ended`
   - `ping`
   - `tools/list`
   - `tools/call`
-- `notifications/turn-ended` 是开源版显式的 turn boundary hook；收到后会清理当前进程里的 visual cursor overlay。CLI `open-computer-use turn-ended [payload]` 也会通过 macOS distributed notification 通知正在运行的 AppKit MCP 进程执行同一类清理，用于接 Codex legacy notify 的 after-agent payload。
+- legacy result 不带 `resultType` 或 modern server 身份字段；两个 era 的 tool 顺序都保持 checked-in 定义顺序，可确定、可缓存。
+- `notifications/turn-ended` 是开源版显式的 turn boundary hook，在两个 era 都保留为 best-effort custom notification；收到后会清理当前进程里的 visual cursor overlay，但它从不作为 snapshot 的正确性边界。CLI `open-computer-use turn-ended [payload]` 也会通过 macOS distributed notification 通知正在运行的 AppKit MCP 进程执行同一类清理，用于接 Codex legacy notify 的 after-agent payload。
 
 ### 3. Tool Service 层
 
 - `ComputerUseService` 负责把 Computer Use tool 请求映射到本地能力，`ComputerUseToolDispatcher` 则把 9 个 tool 的参数解析与 service 方法分发收敛成 MCP server 和 `open-computer-use call` 共用的一层。
+- modern era 的 element_index / focus / 坐标状态不再只靠进程内存维持，而是由一个 bounded `SnapshotHandleStore` 显式承载。三端一致：
+  - `get_app_state` 会 mint 一个不透明 `snapshot_ref`（`ocu_snapshot_v1_` 前缀加 base64url 24 随机字节），handle 内不携带任何截图或 AX 文本；7 个 action tool（`click`、`perform_secondary_action`、`scroll`、`drag`、`type_text`、`press_key`、`set_value`）在 modern era 都要求显式带回上一次 state / action 结果里的 `snapshot_ref`；`list_apps` 与 `get_app_state` 不接受 handle。
+  - store 有硬边界：120 秒绝对 TTL（非 sliding）、每个 app/window target 只有一个 live generation、最多 16 个 live target、64 个 tombstone；先驱逐 expired、再按 least-recently-created 驱逐。macOS 上这个 store 属于长期存活、持有权限的 app agent，因此 socket 连接关闭后 handle 仍然可解析；Linux / Windows 上暂时属于 MCP 进程，进程重启后返回可恢复的 unknown/expired handle 错误，而不是静默换用新状态。
+  - modern action 是事务性的：先在任何副作用前校验 `snapshot_ref`，per-target 把 handle 从 `live` CAS 到 `in_flight`，复核 identity / PID / window 与元素或坐标，仅从存储的 snapshot 发起一次 native dispatch，成功后 mint generation n+1 的后继 handle 并把旧 handle 标记 `superseded`。Linux / Windows 的 runtime 脚本在动作前会校验存储的 runtimeId role/name，不匹配则以 `snapshot_target_changed` 中止且零输入；input 前被拒的失败标记为 `rejected_before_input`，handle 保持 live。错误码含 `snapshot_ref_missing` / `_malformed` / `_unknown` / `_expired` / `_stale` / `_in_use`、`snapshot_target_changed`、`snapshot_action_outcome_uncertain`，每条都标注可 retry same handle 还是必须 recapture，三端消息字符串 byte-identical。
+  - legacy era 的 tool 仍保留旧的进程内隐式 snapshot cache，作为兼容窗口内的临时行为，计划在后续 major release 才移除。
 - `list_apps` 通过 Spotlight metadata query 拉取标准 application 目录里的 app bundle，并读取 `kMDItemUseCount` / `kMDItemLastUsedDate_Ranking` 这类系统元数据；再与 `NSWorkspace` 的运行态 app 合并，输出“当前运行中 + 近 14 天用过”的视图。
 - `get_app_state` 优先走真实 AX / 窗口截图；真实 app 必须同时有未最小化的 `AXWindow` 和可匹配的 on-screen `CGWindow`。如果目标 app 只是隐藏或暂时没有 on-screen window，会先 best-effort unhide / activate / `open -b` / `AXRaise` 并短暂重试，以贴近官方 `computer-use` 会把 Lark / Electron 窗口拉回再采集的行为；恢复后仍无法匹配时返回官方风格的 `Apple event error -10005: cgWindowNotFound`，不再把 application 根节点或无截图窗口伪装成可操作状态。当目标是仓库内 fixture app 时，回退到 fixture 导出的合成状态。真实 AX tree 默认在 macOS、Linux、Windows 上最多渲染 1200 个节点、64 层深度；显式 `get_app_state` / `snapshot` 可通过 `max_tree_nodes` / `max_tree_depth` 覆盖预算，action tools 的刷新结果仍使用默认预算。snapshot 文本默认截断到 500 字符；显式 `get_app_state` / `snapshot` 可通过 `text_limit` 正整数或 `"max"` 覆盖，action tools 的刷新结果仍使用 500 字符默认值。对 Electron/WebView 这类深层 UI 会压缩空 `AXGroup` / `AXUnknown` wrapper、过滤 `AXScrollToVisible` 噪音和空字符串属性，避免 action-critical 的输入框被无语义容器挤出节点预算；但通用节点中的 `AXPress` / `AXConfirm` / `AXOpen` 子节点会形成文本摘要边界，避免多个可点击选项被合并成一个 container。这类动作节点如果 frame 有效、尺寸紧凑，会保留为带窗口相对 `Frame` 的 `button`，并用短文本后代作为按钮摘要，让 icon-only 和文字 Web 控件都能获得可区分的 `element_index`，同时继续过滤零尺寸或覆盖大面积页面的通用点击容器。对原生 open panel / Finder column view 这类把内容放在 `AXContents` / `AXVisibleChildren` 里的控件，也会把可见文件项纳入元素树。
 - MCP `tools/list` 的 description / input schema 当前按官方 `computer-use` 的 9 个 tools 文案和参数面收敛，尽量减少 host 侧提示词和 tool surface 偏差。
 - `open-computer-use call <tool> --args '{...}'` 会直接输出 MCP-style JSON result；`open-computer-use call --calls '[...]'` / `--calls-file <path>` 会在同一进程里顺序执行 JSON 数组里的 tool calls，并复用同一个 `ComputerUseService` 内存态，因此 `get_app_state` 之后的 action tool 可以继续使用同一轮 snapshot 的 `element_index`。序列执行默认会在成功的相邻操作之间 sleep 1 秒，也可以用 `--sleep <seconds>` 覆盖；遇到 `isError=true` 的 tool result 后停止。
+- `call --calls` batch 的 snapshot 语义可以显式化：某个 call 的 args 里显式带 `snapshot_ref` 会让这条 call 走 modern 路径，后继 handle 会自动 thread 进后面省略了 ref 的 action call；环境变量 `OPEN_COMPUTER_USE_STRICT_SNAPSHOTS=1`（真值 `1`/`true`/`yes`/`on`）让 `get_app_state` 强制 mint、action 强制要求 ref，是纯 opt-in、不新增 CLI flag。不带 ref 的 legacy batch 输出保持 byte-identical。
 - 对真实 app 的 `get_app_state` / action tool 入口，当前只保留一层密码管理器 bundle denylist：bundle-id 直传时直接返回 safety denial；名称匹配时默认不解析到这些 app。终端、Chrome / Atlas 和系统组件不再属于内置阻止目标。
 - 普通 app 的 element frame 当前按“窗口左上角为原点”的 window-relative 坐标输出，便于后续把 `element_index` 和截图坐标统一到同一套参考系。
 - `click` / `set_value` 在执行真实动作前后，会额外驱动一层透明 `SoftwareCursorOverlay` window：两者的移动阶段现在共用一条 heading-driven 的官方风格 motion 内核，显式把“当前 cursor 朝向”和“最终 resting pose”一起喂给选路器，优先生成需要时先掉头、再沿车头方向推进的 C 形/单侧大弧轨迹；首次显示时按官方 binary 的 fresh state 从 AppKit 全局 `(0,0)` window origin 生成起点，后续动作继续复用上一帧 visible tip。真正显示出来的 cursor 不再直接等于 path sample，而是经过一层独立的 visual dynamics 状态，把 visible tip、velocity、angle 和 fog/offset 持续推进。`click` 结尾会衔接 click pulse 和更明显但仍然很小的 rotate wobble，`set_value` 则只做 settle / idle，不给 pulse；两者收尾后会在目标点继续保持 idle 状态，等待下一次动作时 tip 保持 anchored、只保留可感知的小角度摆动；只有连续 30 秒没有新动作时才做 cleanup，这样连续 tool call 不会反复从 fresh `(0,0)` 起步；如果宿主在任务 / turn 结束时发出 `turn-ended`，cursor 会立即消失并清掉本轮位置状态。
@@ -107,7 +119,7 @@
 
 ### 6. Windows Runtime
 
-- Windows runtime 位于 `apps/OpenComputerUseWindows`，以 Go 维护 CLI、`call --calls` sequence、MCP JSON-RPC、tool schema 和进程内 snapshot cache。
+- Windows runtime 位于 `apps/OpenComputerUseWindows`，以 Go 维护 CLI、`call --calls` sequence、dual-era MCP JSON-RPC、era-specific tool schema，以及 modern era 的 bounded `SnapshotHandleStore`（legacy era 仍保留进程内隐式 snapshot cache）。
 - 构建入口是 `scripts/build-open-computer-use-windows.sh --arch arm64|amd64`，默认输出到 `dist/windows/<arch>/open-computer-use.exe`；npm release package 会把两个 Windows artifact 内置到已有 root/alias packages，Node launcher 按 `process.platform/process.arch` 自动选择。
 - Go runtime 通过 `go:embed` 带上 `runtime.ps1`，执行 tool call 时临时落盘并调用 Windows PowerShell。PowerShell bridge 使用 `System.Windows.Automation` 做 app/window/element discovery、tree rendering、UIA pattern action、ValuePattern set value 和 ScrollPattern scroll；当目标 app 不暴露对应 pattern 时，fallback 到 `PostMessage` / `SendMessage` 形式的 Win32 window message。
 - Windows runtime 默认只连接已经运行的 app，不会在 `get_app_state` 找不到进程时自动 `Start-Process`，也不会默认允许 `SetFocus` secondary action；这两条前台抢占路径分别需要 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_APP_LAUNCH=1` 和 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_FOCUS_ACTIONS=1` 显式打开。`type_text` 默认优先对可写文本控件的 child HWND 发送 `EM_SETSEL` / `EM_REPLACESEL`，不再默认走可能触发前台激活的 UIA `ValuePattern.SetValue` fallback；需要旧行为时必须设置 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_FALLBACK=1`。UIA pattern 和 Win32 message fallback 本身仍是 best-effort：很多控件可以在后台响应，但 Windows 没有一套对所有 GUI toolkit 都等价于 macOS AX 的后台键鼠输入模型。
@@ -118,7 +130,7 @@
 
 ### 7. Linux Runtime
 
-- Linux runtime 位于 `apps/OpenComputerUseLinux`，以 Go 维护 CLI、`call --calls` sequence、MCP JSON-RPC、tool schema 和进程内 snapshot cache。
+- Linux runtime 位于 `apps/OpenComputerUseLinux`，以 Go 维护 CLI、`call --calls` sequence、dual-era MCP JSON-RPC、era-specific tool schema，以及 modern era 的 bounded `SnapshotHandleStore`（legacy era 仍保留进程内隐式 snapshot cache）。
 - 构建入口是 `scripts/build-open-computer-use-linux.sh --arch arm64|amd64`，默认输出到 `dist/linux/<arch>/open-computer-use`；npm release package 会把两个 Linux artifact 内置到已有 root/alias packages，Node launcher 按 `process.platform/process.arch` 自动选择。
 - Go runtime 通过 `go:embed` 带上 `runtime.py`，执行 tool call 时临时落盘并调用 `python3`。Python bridge 使用 GNOME/GObject Introspection 暴露的 AT-SPI2 接口做 app/window discovery、accessibility tree rendering、semantic action、editable text、value set，以及 best-effort 的 key/mouse fallback；文本能力通过 `Accessible.get_interfaces()` 检测 `Text` / `EditableText`，不依赖不同 PyGObject 版本未必存在的便捷属性。
 - Linux 上最接近 macOS AX 的是 AT-SPI2/D-Bus accessibility，而不是一套统一的后台键鼠输入模型。第一版优先使用元素暴露的 AT-SPI action、EditableText 和 Value 接口；coordinate `click` / `drag` 与 `press_key` 使用 AT-SPI event synthesis fallback，在 Wayland 下只能按 best-effort 处理。
@@ -131,17 +143,20 @@
 ## 关键边界
 
 - 开源版当前不复刻官方闭源实现里的 caller signing、私有 IPC、完整 overlay choreography 和 plugin 自安装逻辑。
+- modern `2026-07-28` 协议目前有一个记录在案的 conformance gap：官方 `@modelcontextprotocol/conformance`（0.1.16）还不认识 spec version `2026-07-28`（它只接受 `2025-03-26`、`2025-06-18`、`2025-11-25`、`draft`、`extension`），且其 server 模式仅支持 HTTP，而本 server 只有 stdio，因此设计验收标准 9 目前无法用官方工具满足。modern 协议的验证暂时依赖仓库内的 golden fixtures 与 suite，raw-stdio modern handshake 已端到端验证正确。SDK 互操作现状：暂无 TS SDK v2（最新 `@modelcontextprotocol/sdk` 1.30.0，最高协议 `2025-11-25`），官方 SDK 只能通过 legacy era 与本 server 互通，modern era 需要能讲 per-request `_meta` + `server/discover` 的客户端。
 - 因为官方 `SkyComputerUseClient` 带有宿主侧 launch constraints，普通 stdio MCP client 在本机上可能被系统直接杀掉；如果要探测官方 bundled `computer-use`，`scripts/computer-use-cli` 的 app-server 模式现在只适合做工具清单和协议面观察。官方 `1.0.755` 的真实 tool call 还会经过 service-side sender authorization / active IPC client 追踪，外部 raw helper 即使走已签名 Codex binary，也可能返回 `Sender process is not authenticated`；需要真实使用官方工具时应走正常 Codex agent/tool 调用链，开源版则继续提供可直连的 `open-computer-use` MCP server。
 - 当前权限引导已经具备可运行 app、深链、拖拽辅助，以及一版更接近官方的 accessory panel 入场动画和返回 affordance；点击链路也已经补上独立 visual cursor、官方 asset fallback 和相对目标 window 的排序逻辑，并且在 overlay 可见期间会持续重申“排在目标 window 之上”，避免用户手动激活目标 app 后 cursor 被目标窗口重新盖住；但整体还没有完全复刻官方那套嵌入式 choreography / host 集成 / session approval 体验。
 - screenshot 当前通过 `ScreenCaptureKit` 捕获目标窗口，并以 MCP `image` content block 的 base64 PNG 返回，不再把普通 app 截图落盘到仓库或临时目录；编码前会按最大尺寸和目标字节数自适应缩小，避免复杂页面的大 PNG 触发 host 侧 MCP result 降级，同时 coordinate tools 继续按实际返回的 screenshot pixel 尺寸映射坐标；单次 ScreenCaptureKit capture 会设置超时，超时后省略 image block 而不是卡住整个 `get_app_state`。
-- 会话状态现在是进程内内存态，保存每个 app 最近一次 snapshot 和 element index 映射。
+- 会话状态分两条路径：modern `2026-07-28` era 用显式的 bounded `SnapshotHandleStore` 承载每一轮 snapshot 与 element index 映射（handle 显式、有界、可恢复），legacy `2025-03-26` era 在兼容窗口内保留旧的进程内隐式 cache。element_index 状态不再只靠进程内存维持。
 
 ## 主要验证路径
 
 - 单元测试：`swift test`
 - standalone cursor 构建：`swift build --product StandaloneCursor`
 - cursor lab 构建：`swift build --product CursorMotion`
-- 端到端 smoke：`./scripts/run-tool-smoke-tests.sh`（标准 9-tool smoke + visual cursor idle smoke；脚本默认以 headless 模式启动内部 fixture，避免在用户桌面弹出测试窗口）
+- 跨平台协议 golden fixtures：`./scripts/test-mcp-protocol-fixtures.sh`（已接入 `scripts/ci.sh`，用同一批 newline-delimited JSON fixtures 对 Swift、Linux、Windows 的 legacy 与 modern 响应做规范化比对，legacy 保持 byte-identical）
+- MCP conformance 包装：`./scripts/test-mcp-conformance.sh`（会在官方 suite 不支持 `2026-07-28` 时诚实降级，见下方“关键边界”里的 conformance gap）
+- 端到端 smoke：`./scripts/run-tool-smoke-tests.sh`（legacy full 9-tool smoke + visual cursor idle smoke + modern smoke；modern smoke 会对 fixture app 跑一条真实 handle 链，含 stale-reuse 拒绝；脚本默认以 headless 模式启动内部 fixture，避免在用户桌面弹出测试窗口）
 - app 打包：`./scripts/build-open-computer-use-app.sh debug`
 - 权限 onboarding 端到端回归：`./scripts/run-permission-onboarding-e2e.sh`（需要当前 macOS 对被测 `open-computer-use` 已授予 Accessibility 与 Screen Recording；默认禁用 app-agent proxy 来测试当前 CLI 运行态，可用 `OPEN_COMPUTER_USE_E2E_CLI=/path/to/open-computer-use` 指定被测 CLI，或用 `OPEN_COMPUTER_USE_E2E_DISABLE_APP_AGENT_PROXY=0` 显式覆盖默认代理行为）
 - npm staging：`node ./scripts/npm/build-packages.mjs`

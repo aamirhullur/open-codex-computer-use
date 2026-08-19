@@ -9,13 +9,48 @@ struct MCPResponse {
     let error: [String: Any]?
 }
 
+// A modern tools/call result, exposing the fields the modern smoke path asserts:
+// the structured snapshot_ref (and error taxonomy), the wire-level resultType, and
+// the server-identity _meta the adapter decorates onto every modern result.
+struct ModernToolResult {
+    let result: [String: Any]
+    let error: [String: Any]?
+
+    var isError: Bool { (result["isError"] as? Bool) ?? false }
+
+    var text: String? {
+        let content = result["content"] as? [[String: Any]]
+        return content?.first(where: { $0["type"] as? String == "text" })?["text"] as? String
+    }
+
+    var structuredContent: [String: Any]? { result["structuredContent"] as? [String: Any] }
+    var snapshotRef: String? { structuredContent?["snapshot_ref"] as? String }
+    private var errorEnvelope: [String: Any]? { structuredContent?["error"] as? [String: Any] }
+    var errorCode: String? { errorEnvelope?["code"] as? String }
+    var errorRetry: String? { errorEnvelope?["retry"] as? String }
+    var resultType: String? { result["resultType"] as? String }
+    var serverInfoName: String? { modernServerInfoName(result) }
+}
+
+// The io.modelcontextprotocol/serverInfo.name the modern adapter decorates onto
+// every modern result and onto server/discover.
+func modernServerInfoName(_ result: [String: Any]) -> String? {
+    let meta = result["_meta"] as? [String: Any]
+    let serverInfo = meta?["io.modelcontextprotocol/serverInfo"] as? [String: Any]
+    return serverInfo?["name"] as? String
+}
+
 final class MCPClient {
     private let process: Process
     private let stdin: FileHandle
     private let stdout: FileHandle
     private var nextID = 1
+    // When true, every request carries the modern per-request _meta and the client
+    // drives the 2026-07-28 surface (server/discover first, no initialize).
+    private let modern: Bool
 
-    init(executableURL: URL, arguments: [String], environment: [String: String]? = nil) throws {
+    init(executableURL: URL, arguments: [String], environment: [String: String]? = nil, modern: Bool = false) throws {
+        self.modern = modern
         process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
@@ -29,6 +64,51 @@ final class MCPClient {
         try process.run()
         stdin = stdinPipe.fileHandleForWriting
         stdout = stdoutPipe.fileHandleForReading
+    }
+
+    // The modern per-request envelope: protocol version, evaluated-per-request
+    // client capabilities, and client info. Matched verbatim against the adapter's
+    // io.modelcontextprotocol/ namespace keys.
+    private func modernMeta() -> [String: Any] {
+        [
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": [:],
+            "io.modelcontextprotocol/clientInfo": [
+                "name": "OpenComputerUseSmokeSuite",
+                "version": "0.3.1",
+            ],
+        ]
+    }
+
+    // server/discover is the modern stdio compatibility probe: no initialize is sent.
+    func discover() throws -> [String: Any] {
+        let response = try request(method: "server/discover", params: [:])
+        if let error = response.error {
+            throw SmokeError.message("server/discover error: \(error)")
+        }
+        return response.result ?? [:]
+    }
+
+    // The full modern tools/list result object (tools plus resultType/_meta/cache).
+    func listToolsModern() throws -> [String: Any] {
+        let response = try request(method: "tools/list", params: [:])
+        if let error = response.error {
+            throw SmokeError.message("tools/list error: \(error)")
+        }
+        return response.result ?? [:]
+    }
+
+    // Modern tools/call returning the full result so the caller can assert the
+    // structured snapshot_ref, the error taxonomy, resultType, and server _meta.
+    func callToolResult(_ name: String, arguments: [String: Any]) throws -> ModernToolResult {
+        let response = try request(method: "tools/call", params: [
+            "name": name,
+            "arguments": arguments,
+        ])
+        if let error = response.error {
+            throw SmokeError.message("JSON-RPC error for \(name): \(error)")
+        }
+        return ModernToolResult(result: response.result ?? [:], error: response.error)
     }
 
     func initialize() throws {
@@ -89,11 +169,18 @@ final class MCPClient {
         let id = nextID
         nextID += 1
 
+        // Modern connections carry params._meta on every request. Legacy requests
+        // are left untouched so the existing smoke path stays byte-identical.
+        var effectiveParams = params
+        if modern {
+            effectiveParams["_meta"] = modernMeta()
+        }
+
         let payload: [String: Any] = [
             "jsonrpc": "2.0",
             "id": id,
             "method": method,
-            "params": params,
+            "params": effectiveParams,
         ]
 
         try write(payload)
@@ -184,6 +271,8 @@ enum OpenComputerUseSmokeSuite {
             try runFullSmoke(serverURL: serverURL, appName: appName)
         case .cursorIdleOnly:
             try runCursorIdleSmoke(serverURL: serverURL, appName: appName)
+        case .modern:
+            try runModernSmoke(serverURL: serverURL, appName: appName)
         }
     }
 
@@ -345,6 +434,126 @@ enum OpenComputerUseSmokeSuite {
         print("Cursor idle smoke completed.")
     }
 
+    // Modern 2026-07-28 pass. Drives the same server binary + fixture app with
+    // stateless semantics: server/discover first (no initialize), per-request _meta
+    // on every request, the modern catalog, and a real handle chain that threads a
+    // snapshot_ref through get_app_state -> click -> set_value, then proves the
+    // superseded ref is rejected as stale with zero effect, and that a ref-less
+    // action is rejected as missing.
+    private static func runModernSmoke(serverURL: URL, appName: String) throws {
+        let client = try MCPClient(
+            executableURL: serverURL,
+            arguments: ["mcp"],
+            environment: smokeServerEnvironment(),
+            modern: true
+        )
+        defer {
+            client.terminate()
+        }
+
+        print("1. server/discover (no initialize)")
+        let discover = try client.discover()
+        try expect((discover["resultType"] as? String) == "complete", "server/discover must return resultType complete")
+        let supported = discover["supportedVersions"] as? [String] ?? []
+        try expect(supported == ["2026-07-28", "2025-03-26"], "server/discover must advertise both revisions in order, got \(supported)")
+        try expect(modernServerInfoName(discover) == "open-computer-use", "server/discover _meta must carry serverInfo")
+
+        print("2. tools/list modern catalog")
+        let listResult = try client.listToolsModern()
+        try expect((listResult["resultType"] as? String) == "complete", "modern tools/list must return resultType complete")
+        try expect(modernServerInfoName(listResult) == "open-computer-use", "modern tools/list _meta must carry serverInfo")
+        let tools = listResult["tools"] as? [[String: Any]] ?? []
+        try expect(tools.count == 9, "modern catalog must expose 9 tools, got \(tools.count)")
+        let actionTools: Set<String> = [
+            "click", "perform_secondary_action", "scroll", "drag", "type_text", "press_key", "set_value",
+        ]
+        for tool in tools {
+            let name = tool["name"] as? String ?? ""
+            let required = ((tool["inputSchema"] as? [String: Any])?["required"] as? [String]) ?? []
+            if actionTools.contains(name) {
+                try expect(required.contains("snapshot_ref"), "\(name) must require snapshot_ref in the modern catalog")
+            } else {
+                try expect(!required.contains("snapshot_ref"), "\(name) must not require snapshot_ref")
+            }
+        }
+
+        print("3. get_app_state mints a snapshot_ref (structuredContent + text)")
+        let stateResult = try client.callToolResult("get_app_state", arguments: ["app": appName])
+        try expect(!stateResult.isError, "get_app_state should succeed: \(stateResult.text ?? "")")
+        try expect(stateResult.resultType == "complete", "modern get_app_state must carry resultType complete")
+        try expect(stateResult.serverInfoName == "open-computer-use", "modern get_app_state must carry serverInfo _meta")
+        guard let ref0 = stateResult.snapshotRef else {
+            throw SmokeError.message("get_app_state must return a snapshot_ref in structuredContent")
+        }
+        let stateText = stateResult.text ?? ""
+        try expect(stateText.contains("snapshot_ref: \(ref0)"), "snapshot_ref must also appear in the text block")
+        var index = parseElementIndex(stateText)
+        try expect(index.keys.contains("fixture-increment"), "fixture button should be indexed")
+        let counterInitial = parseCounterValue(stateText)
+
+        print("4. click with the snapshot_ref returns a differing successor")
+        let clickResult = try client.callToolResult("click", arguments: [
+            "app": appName,
+            "snapshot_ref": ref0,
+            "element_index": index["fixture-increment"]!.index,
+        ])
+        try expect(!clickResult.isError, "modern click should succeed: \(clickResult.text ?? "")")
+        try expect(clickResult.resultType == "complete", "modern action result must carry resultType complete")
+        try expect(clickResult.serverInfoName == "open-computer-use", "modern action result must carry serverInfo _meta")
+        guard let ref1 = clickResult.snapshotRef else {
+            throw SmokeError.message("click must return a successor snapshot_ref")
+        }
+        try expect(ref1 != ref0, "successor snapshot_ref must differ from the consumed one")
+        let clickText = clickResult.text ?? ""
+        try expect(clickText.contains("snapshot_ref: \(ref1)"), "successor ref must appear in the action text block")
+        try expect(parseCounterValue(clickText) == counterInitial + 1, "modern click should increment the counter")
+        index = parseElementIndex(clickText)
+
+        print("5. set_value threads the successor forward")
+        let setResult = try client.callToolResult("set_value", arguments: [
+            "app": appName,
+            "snapshot_ref": ref1,
+            "element_index": index["fixture-input"]!.index,
+            "value": "modern-smoke-ok",
+        ])
+        try expect(!setResult.isError, "modern set_value should succeed: \(setResult.text ?? "")")
+        guard let ref2 = setResult.snapshotRef else {
+            throw SmokeError.message("set_value must return a successor snapshot_ref")
+        }
+        try expect(ref2 != ref1, "set_value successor must differ from its predecessor")
+        let setText = setResult.text ?? ""
+        try expect(setText.contains("modern-smoke-ok"), "set_value should update the text field")
+        let counterAfterSet = parseCounterValue(setText)
+
+        // The stale/missing steps do not depend on the concrete element, but both use
+        // the same parsed element_index (with a shared fallback) so a future reorder
+        // cannot introduce a type or value inconsistency across these calls.
+        let probeIndex = index["fixture-increment"]?.index ?? "1"
+
+        print("6. reusing the superseded snapshot_ref is rejected as stale with zero effect")
+        let staleResult = try client.callToolResult("click", arguments: [
+            "app": appName,
+            "snapshot_ref": ref0,
+            "element_index": probeIndex,
+        ])
+        try expect(staleResult.isError, "reusing a superseded snapshot_ref must be an error")
+        try expect(staleResult.errorCode == "snapshot_ref_stale", "expected snapshot_ref_stale, got \(staleResult.errorCode ?? "nil")")
+        try expect(staleResult.errorRetry == "new_state", "a stale ref must instruct recapture (retry new_state)")
+
+        let afterState = try client.callToolResult("get_app_state", arguments: ["app": appName])
+        try expect(parseCounterValue(afterState.text ?? "") == counterAfterSet, "the stale-ref action must have zero effect on the counter")
+
+        print("7. a modern action without a snapshot_ref is rejected as missing")
+        let missingResult = try client.callToolResult("click", arguments: [
+            "app": appName,
+            "element_index": probeIndex,
+        ])
+        try expect(missingResult.isError, "a modern action without a snapshot_ref must error")
+        try expect(missingResult.errorCode == "snapshot_ref_missing", "expected snapshot_ref_missing, got \(missingResult.errorCode ?? "nil")")
+
+        print("Modern smoke suite completed.")
+    }
+
     private static func smokeServerEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         environment["OPEN_COMPUTER_USE_DISABLE_APP_AGENT_PROXY"] = "1"
@@ -498,9 +707,12 @@ enum OpenComputerUseSmokeSuite {
 private enum SmokeMode {
     case full
     case cursorIdleOnly
+    case modern
 
     init(arguments: [String]) {
-        if arguments.contains("--cursor-idle-only") {
+        if arguments.contains("--modern") {
+            self = .modern
+        } else if arguments.contains("--cursor-idle-only") {
             self = .cursorIdleOnly
         } else {
             self = .full

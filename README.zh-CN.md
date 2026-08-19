@@ -76,6 +76,8 @@ ocu install-codex-mcp
 }
 ```
 
+stdio MCP server 现在是 dual-era 的：现代 host 走 MCP `2026-07-28`，带 per-request metadata 和显式的 `snapshot_ref` 链（`get_app_state` mint 一个 handle，每个 action 再把它带回来），既有的 `2025-03-26` 客户端保持不变。对你来说接入命令没有变化，宿主仍然运行 `open-computer-use mcp`。
+
 ### Skill
 
 一键安装skill：

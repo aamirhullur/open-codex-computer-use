@@ -76,6 +76,8 @@ Or add it to your own client manually:
 }
 ```
 
+The stdio MCP server is dual-era. Modern hosts get MCP `2026-07-28` with per-request metadata and an explicit `snapshot_ref` chain (`get_app_state` mints a handle and each action passes it back), while existing `2025-03-26` clients keep working unchanged. Nothing changes for you: hosts still run `open-computer-use mcp`.
+
 ### Skill
 
 Install the skill directly:

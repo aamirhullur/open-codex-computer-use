@@ -14,6 +14,17 @@
 - fixture app 的合成状态只写到本地临时 JSON 文件，目的是支撑 deterministic smoke test；当前写入走原子替换，减少测试期间的读写竞争。
 - 当前仓库不引入第三方服务，也不上传截图、AX tree 或输入内容。
 
+## Snapshot handle 安全
+
+modern `2026-07-28` era 的 `snapshot_ref` 是一个 capability 引用，不是认证凭据，它的安全属性如下：
+
+- handle 内不放任何截图像素或 accessibility 文本；它只是 `ocu_snapshot_v1_` 前缀加 24 随机字节，本身不可反推 UI 内容。
+- 记录过期或被 `superseded` 时，会 zero / 释放对应的截图 buffer 和 native element 引用，避免退休 handle 继续持有敏感画面。
+- store 对 handle 创建有硬上界（120 秒绝对 TTL、单 live generation per target、16 live target、64 tombstone、先过期后 least-recently-created 驱逐），拒绝无界增长。
+- 从 client 收到的 handle 一律当成不可信输入，解析时尽量使用 constant-time 比较。
+- 日志只会带 `ocu_snapshot_v1_` 前缀和末 6 位做关联，绝不写完整 handle，也不写截图、AX 文本、输入文本或 client 传入的 metadata 值。
+- 密码管理器 bundle denylist 和全局指针安全门仍然位于 snapshot 采集与 native action 之前，handle 机制不放宽任何既有授权边界。
+
 ## 授权与最小权限
 
 - 当前只保留一层密码管理器 bundle denylist / bundle-id gate：

@@ -127,3 +127,32 @@ func assertKeys(t *testing.T, label string, m map[string]any, want []string) {
 		}
 	}
 }
+
+func TestSuccessorRef(t *testing.T) {
+	// A modern get_app_state / action result carries a non-empty snapshot_ref.
+	sc := StructuredState{SnapshotRef: "ocu_snapshot_v1_abc"}.StructuredContent()
+	if ref, ok := SuccessorRef(sc); !ok || ref != "ocu_snapshot_v1_abc" {
+		t.Fatalf("SuccessorRef(modern) = (%q, %v), want (ocu_snapshot_v1_abc, true)", ref, ok)
+	}
+
+	// A nil structuredContent (legacy result) yields no successor.
+	if ref, ok := SuccessorRef(nil); ok || ref != "" {
+		t.Fatalf("SuccessorRef(nil) = (%q, %v), want (\"\", false)", ref, ok)
+	}
+
+	// An error envelope carries "error", not "snapshot_ref".
+	errEnvelope := NewSnapshotError(ErrSnapshotRefStale, MsgSnapshotRefStale).Result()["structuredContent"].(map[string]any)
+	if ref, ok := SuccessorRef(errEnvelope); ok || ref != "" {
+		t.Fatalf("SuccessorRef(error) = (%q, %v), want (\"\", false)", ref, ok)
+	}
+
+	// An empty snapshot_ref string is not a usable successor.
+	if ref, ok := SuccessorRef(map[string]any{SnapshotRefKey: ""}); ok || ref != "" {
+		t.Fatalf("SuccessorRef(empty) = (%q, %v), want (\"\", false)", ref, ok)
+	}
+
+	// A non-string snapshot_ref value is rejected.
+	if ref, ok := SuccessorRef(map[string]any{SnapshotRefKey: 42}); ok || ref != "" {
+		t.Fatalf("SuccessorRef(non-string) = (%q, %v), want (\"\", false)", ref, ok)
+	}
+}

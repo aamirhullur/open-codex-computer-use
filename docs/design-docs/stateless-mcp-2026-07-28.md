@@ -1,10 +1,10 @@
 # Stateless MCP 2026-07-28 design
 
-Status: proposed for implementation
+Status: implemented with recorded gaps (M0-M5 on agent/stateless-mcp-implementation-spec). Acceptance criterion 9 (official 2026-07-28 conformance) is unsatisfiable by current official tooling and is tracked as a gap; see the execution plan.
 
 Owner: Open Computer Use maintainers
 
-Last updated: 2026-08-13
+Last updated: 2026-08-19
 
 Related execution plan: `docs/exec-plans/active/20260813-stateless-mcp-2026-07-28.md`
 

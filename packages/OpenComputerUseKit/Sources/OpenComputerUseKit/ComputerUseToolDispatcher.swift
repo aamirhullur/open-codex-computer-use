@@ -51,8 +51,9 @@ public final class ComputerUseToolDispatcher {
     }
 
     // The seven modern action tools that require and consume a snapshot_ref through
-    // the M4 transaction. list_apps and get_app_state never take a handle.
-    private static let modernActionTools: Set<String> = [
+    // the M4 transaction. list_apps and get_app_state never take a handle. Internal
+    // so the CLI batch threader can classify a call as an action.
+    static let modernActionTools: Set<String> = [
         "click",
         "perform_secondary_action",
         "scroll",
@@ -235,8 +236,15 @@ public final class ComputerUseToolDispatcher {
     }
 
     public func callToolAsResult(name: String, arguments: [String: Any]) -> ToolCallResult {
+        callToolAsResult(name: name, arguments: arguments, modern: false)
+    }
+
+    // Non-throwing dispatch used by the CLI call path. The modern flag routes the
+    // action tools through the snapshot_ref transaction; the legacy default keeps
+    // the pre-M5 byte-identical behavior.
+    public func callToolAsResult(name: String, arguments: [String: Any], modern: Bool) -> ToolCallResult {
         do {
-            return try callTool(name: name, arguments: arguments)
+            return try callTool(name: name, arguments: arguments, modern: modern)
         } catch let error as ComputerUseError {
             return ToolCallResult.text(
                 error.errorDescription ?? String(describing: error),
@@ -392,12 +400,86 @@ public struct OpenComputerUseCallOutput {
 
 public typealias OpenComputerUseSleepHandler = (TimeInterval) -> Void
 
+// Truthy gate for the CLI batch strict-snapshot mode, matching the app-agent
+// proxy's env truthiness convention (1/true/yes/on). Strict is opt-in this
+// release: get_app_state and action calls run modern (get_app_state mints), and
+// an action that cannot be auto-threaded surfaces snapshot_ref_missing.
+public func openComputerUseStrictSnapshotsEnabled(
+    _ environment: [String: String] = ProcessInfo.processInfo.environment
+) -> Bool {
+    guard let value = environment["OPEN_COMPUTER_USE_STRICT_SNAPSHOTS"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+    else {
+        return false
+    }
+    return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+// Per-call modern-dispatch decision for a CLI --calls batch. Pure and
+// independently unit-testable. A sequential legacy batch (no refs anywhere, not
+// strict) stays modern=false throughout, so its output is byte-identical to the
+// pre-M5 behavior.
+struct OpenComputerUseBatchThreader {
+    let strict: Bool
+    // The latest successor snapshot_ref returned by a modern call in this batch,
+    // auto-threaded into a later action that omits one.
+    private(set) var latestSnapshotRef: String?
+
+    init(strict: Bool) {
+        self.strict = strict
+    }
+
+    struct Plan {
+        let modern: Bool
+        let arguments: [String: Any]
+    }
+
+    // Decide how one call dispatches, auto-filling snapshot_ref where applicable.
+    func plan(tool: String, arguments: [String: Any]) -> Plan {
+        var effective = arguments
+        let explicitRef = (arguments["snapshot_ref"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let isAction = ComputerUseToolDispatcher.modernActionTools.contains(tool)
+        let isGetState = tool == "get_app_state"
+
+        // (a) An explicit snapshot_ref forces the modern path for this call.
+        if let explicitRef, !explicitRef.isEmpty {
+            return Plan(modern: true, arguments: effective)
+        }
+        // (c) Auto-thread the latest successor into an action that omits one.
+        if isAction, let latest = latestSnapshotRef {
+            effective["snapshot_ref"] = latest
+            return Plan(modern: true, arguments: effective)
+        }
+        // (b) Strict mints on get_app_state and forces actions modern; an action
+        // still lacking a ref surfaces snapshot_ref_missing from the transaction.
+        if strict, isAction || isGetState {
+            return Plan(modern: true, arguments: effective)
+        }
+        // (d) Legacy: byte-identical to the pre-M5 batch behavior.
+        return Plan(modern: false, arguments: effective)
+    }
+
+    // Thread a successful call's successor snapshot_ref forward. Error results
+    // carry structuredContent.error (no snapshot_ref) and never overwrite it.
+    mutating func record(result: ToolCallResult) {
+        if let ref = result.structuredContent?["snapshot_ref"] as? String, !ref.isEmpty {
+            latestSnapshotRef = ref
+        }
+    }
+}
+
 public func runOpenComputerUseCall(
     _ invocation: OpenComputerUseCallInvocation,
     service: ComputerUseService = ComputerUseService(),
-    sleepHandler: OpenComputerUseSleepHandler = { Thread.sleep(forTimeInterval: $0) }
+    sleepHandler: OpenComputerUseSleepHandler = { Thread.sleep(forTimeInterval: $0) },
+    strictSnapshots: Bool? = nil
 ) throws -> OpenComputerUseCallOutput {
     let dispatcher = ComputerUseToolDispatcher(service: service)
+    var threader = OpenComputerUseBatchThreader(
+        strict: strictSnapshots ?? openComputerUseStrictSnapshotsEnabled()
+    )
 
     switch invocation {
     case let .single(toolName, argumentsJSON, argumentsFile):
@@ -405,7 +487,12 @@ public func runOpenComputerUseCall(
             json: argumentsJSON,
             file: argumentsFile
         )
-        let result = dispatcher.callToolAsResult(name: toolName, arguments: arguments)
+        let plan = threader.plan(tool: toolName, arguments: arguments)
+        let result = dispatcher.callToolAsResult(
+            name: toolName,
+            arguments: plan.arguments,
+            modern: plan.modern
+        )
         return OpenComputerUseCallOutput(
             jsonObject: result.asDictionary,
             hasToolError: result.isError
@@ -417,7 +504,13 @@ public func runOpenComputerUseCall(
         var hasToolError = false
 
         for (index, call) in calls.enumerated() {
-            let result = dispatcher.callToolAsResult(name: call.tool, arguments: call.arguments)
+            let plan = threader.plan(tool: call.tool, arguments: call.arguments)
+            let result = dispatcher.callToolAsResult(
+                name: call.tool,
+                arguments: plan.arguments,
+                modern: plan.modern
+            )
+            threader.record(result: result)
             outputs.append([
                 "tool": call.tool,
                 "result": result.asDictionary,

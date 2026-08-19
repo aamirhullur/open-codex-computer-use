@@ -4,6 +4,7 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-08-19 (未发布) | Dual-era MCP 与显式 snapshot 链 | 现代 MCP host 现在能以无会话、可恢复的方式驱动 Computer Use：`get_app_state` 返回一个显式 `snapshot_ref`，每个 action 带回该 handle，过期或跨代复用会在任何输入前安全失败而不是误点旧元素；既有 `2025-03-26` 客户端保持完全不变，接入命令仍是 `open-computer-use mcp`。 | macOS、Linux、Windows 三端上线 dual-era stdio MCP server：现代 `2026-07-28` era 带 per-request `_meta`、`server/discover`、`resultType` / serverInfo、public 缓存提示，以及由 bounded `SnapshotHandleStore` 承载、事务化的 7 个 action tool；legacy `2025-03-26` era 通过三端共享 golden fixtures 验证保持 byte-identical。无版本 bump，无用户命令或配置变更。 |
 | 2026-08-08 | Linux AT-SPI 文本能力检测 | Ubuntu 24.04 等 PyGObject 环境中的 `get_app_state`、`type_text` 和 `set_value` 不再因缺少非标准 `Accessible.is_text` / `is_editable_text` 属性而崩溃。 | Linux bridge 改为通过标准 `Accessible.get_interfaces()` 检测 `Text` / `EditableText`，并新增不依赖真实桌面的 Python 回归测试。 |
 
 ## 2026-07

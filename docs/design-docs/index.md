@@ -12,6 +12,6 @@
 
 - `core-beliefs.md`
 
-## Proposed designs
+## Implemented designs (with recorded gaps)
 
-- `stateless-mcp-2026-07-28.md` — proposed dual-era MCP `2026-07-28` migration, explicit snapshot handles, compatibility rollout, and verification criteria. The active implementation plan is `docs/exec-plans/active/20260813-stateless-mcp-2026-07-28.md`.
+- `stateless-mcp-2026-07-28.md`: dual-era MCP `2026-07-28` migration, explicit snapshot handles, compatibility rollout, and verification criteria. Implemented on `agent/stateless-mcp-implementation-spec` (M0-M5), with modern-protocol validation resting on in-repo golden fixtures and suites. Recorded gap: the official conformance suite does not yet know spec version `2026-07-28` and is HTTP-only, so design acceptance criterion 9 cannot currently be satisfied by official tooling; the implementation plan `docs/exec-plans/active/20260813-stateless-mcp-2026-07-28.md` is held open pending upstream support.
