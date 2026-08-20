@@ -288,7 +288,18 @@ final class FixtureAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDele
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            let receivedScope: String?
+            if let object = notification.object {
+                guard let scope = object as? String else {
+                    return
+                }
+                receivedScope = scope
+            } else {
+                receivedScope = nil
+            }
+
             guard
+                FixtureBridge.acceptsCommand(scope: receivedScope),
                 let payload = notification.userInfo?["payload"] as? String,
                 let data = payload.data(using: .utf8),
                 let command = try? JSONDecoder().decode(FixtureCommand.self, from: data)

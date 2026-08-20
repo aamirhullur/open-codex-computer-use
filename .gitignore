@@ -6,6 +6,7 @@ dist/
 .gemini/
 artifacts/codex-dumps/
 research/
+node_modules/
 __pycache__/
 *.pyc
 

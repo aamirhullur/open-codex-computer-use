@@ -110,11 +110,38 @@ public struct FixtureCommand: Codable, Sendable {
 public enum FixtureBridge {
     public static let appName = "OpenComputerUseFixture"
     public static let distributedNotificationName = Notification.Name("dev.opencodex.opencomputeruse.fixture.command")
+    // Test-only isolation hook. The production default stays NSTemporaryDirectory;
+    // smoke processes can opt into an owned root without touching shared state.
+    static let stateRootEnvironmentKey = "OPEN_COMPUTER_USE_FIXTURE_STATE_ROOT"
 
     public static var stateFileURL: URL {
-        URL(fileURLWithPath: NSTemporaryDirectory())
+        stateFileURL(environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func stateFileURL(environment: [String: String]) -> URL {
+        let root = commandScope(environment: environment) ?? NSTemporaryDirectory()
+
+        return URL(fileURLWithPath: root, isDirectory: true)
             .appendingPathComponent("open-computer-use-fixture", isDirectory: true)
             .appendingPathComponent("state.json")
+    }
+
+    public static var commandScope: String? {
+        commandScope(environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func commandScope(environment: [String: String]) -> String? {
+        let configuredRoot = environment[stateRootEnvironmentKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return configuredRoot.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    public static func acceptsCommand(scope receivedScope: String?) -> Bool {
+        acceptsCommand(scope: receivedScope, environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func acceptsCommand(scope receivedScope: String?, environment: [String: String]) -> Bool {
+        receivedScope == commandScope(environment: environment)
     }
 
     public static func readState() throws -> FixtureAppState? {
@@ -151,7 +178,7 @@ public enum FixtureBridge {
         let payload = try String(data: JSONEncoder().encode(command), encoding: .utf8)
         DistributedNotificationCenter.default().postNotificationName(
             distributedNotificationName,
-            object: nil,
+            object: commandScope,
             userInfo: payload.map { ["payload": $0] },
             options: .deliverImmediately
         )

@@ -7,6 +7,10 @@
     "npm:pack": "./scripts/release-package.sh",
     "npm:publish": "node ./scripts/npm/publish-packages.mjs",
     "package:skill": "./scripts/package-skill.sh",
-    "release:notes:validate": "node ./scripts/validate-github-release-notes.mjs"
+    "release:notes:validate": "node ./scripts/validate-github-release-notes.mjs",
+    "test:mcp-sdk-interop": "swift build && node ./scripts/test-mcp-sdk-interop.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0"
   }
 }
